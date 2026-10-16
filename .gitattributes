@@ -1,0 +1,8 @@
+# テキストファイルの改行コードをリポジトリ内で LF に統一する
+# （Windows環境の core.autocrlf=true によるコミット時の変換警告を解消する）
+* text=auto eol=lf
+
+*.ico binary
+*.png binary
+*.jpg binary
+*.pdf binary

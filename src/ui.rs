@@ -72,6 +72,7 @@ pub struct TyperApp {
     /// 検索・置換パネルの状態
     show_find_replace: bool,
     find_query: String,
+    find_ignore_case: bool,
     replace_text: String,
     current_match_index: usize,
 
@@ -182,6 +183,7 @@ impl TyperApp {
             pending_cursor_selection: None,
             show_find_replace: false,
             find_query: String::new(),
+            find_ignore_case: false,
             replace_text: String::new(),
             current_match_index: 0,
             show_page_settings_bar: true,
@@ -612,13 +614,32 @@ impl TyperApp {
         if self.find_query.is_empty() {
             return Vec::new();
         }
-        let mut results = Vec::new();
         let q_chars = self.find_query.chars().count();
-        for (byte_idx, _) in self.markdown_text.match_indices(&self.find_query) {
-            let start_char = byte_to_char_idx(&self.markdown_text, byte_idx);
-            results.push((start_char, start_char + q_chars));
+
+        if self.find_ignore_case {
+            let haystack: Vec<char> = self.markdown_text.chars().collect();
+            let needle: Vec<char> = self.find_query.chars().collect();
+            let mut results = Vec::new();
+            if haystack.len() >= needle.len() {
+                for start in 0..=(haystack.len() - needle.len()) {
+                    let matched = needle
+                        .iter()
+                        .enumerate()
+                        .all(|(j, &nc)| haystack[start + j].to_lowercase().eq(nc.to_lowercase()));
+                    if matched {
+                        results.push((start, start + q_chars));
+                    }
+                }
+            }
+            results
+        } else {
+            let mut results = Vec::new();
+            for (byte_idx, _) in self.markdown_text.match_indices(&self.find_query) {
+                let start_char = byte_to_char_idx(&self.markdown_text, byte_idx);
+                results.push((start_char, start_char + q_chars));
+            }
+            results
         }
-        results
     }
 
     fn select_find_match(&mut self, match_idx: usize) {
@@ -657,19 +678,23 @@ impl TyperApp {
     }
 
     fn replace_all_matches(&mut self) {
-        if self.find_query.is_empty() || !self.markdown_text.contains(&self.find_query) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
             return;
         }
-        let count = self.markdown_text.matches(&self.find_query).count();
         self.push_undo_snapshot();
-        self.markdown_text = self
-            .markdown_text
-            .replace(&self.find_query, &self.replace_text);
+        // 後ろから置換することで、前方のマッチのバイトオフセットが崩れないようにする
+        for &(s_char, e_char) in matches.iter().rev() {
+            let s_byte = char_to_byte_idx(&self.markdown_text, s_char);
+            let e_byte = char_to_byte_idx(&self.markdown_text, e_char);
+            self.markdown_text
+                .replace_range(s_byte..e_byte, &self.replace_text);
+        }
         self.is_dirty = true;
         self.revision += 1;
         self.pending_render = true;
         self.last_edit_time = Instant::now();
-        self.status_message = format!("{count} 件をすべて置換しました");
+        self.status_message = format!("{} 件をすべて置換しました", matches.len());
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
@@ -755,6 +780,10 @@ impl eframe::App for TyperApp {
             || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::H))
         {
             self.show_find_replace = !self.show_find_replace;
+        }
+        if self.show_find_replace && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.show_find_replace = false;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::B)) {
             self.wrap_selection_or_insert("**", "太字テキスト", "**");
@@ -1177,7 +1206,18 @@ impl eframe::App for TyperApp {
                         .resizable(true)
                         .default_size(180.0)
                         .show(ui, |ui| {
-                            ui.label(RichText::new("生成されたTypst組版コード (自動変換)").strong());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("生成されたTypst組版コード (自動変換)").strong());
+                                if ui
+                                    .small_button("📋 コピー")
+                                    .on_hover_text("生成されたTypstコードをクリップボードにコピーします")
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(self.last_typst_code.clone());
+                                    self.status_message =
+                                        "Typstコードをクリップボードにコピーしました".to_string();
+                                }
+                            });
                             egui::ScrollArea::vertical()
                                 .id_salt("typst_code_scroll")
                                 .show(ui, |ui| {
@@ -1349,12 +1389,16 @@ impl eframe::App for TyperApp {
                 );
                 if ui
                     .small_button("🎨 適用")
-                    .on_hover_text("入力したHEXカラーコードで選択範囲（または新規テキスト）を着色します")
+                    .on_hover_text("入力したHEXカラーコード（#rrggbb または #rgb）で選択範囲（または新規テキスト）を着色します")
                     .clicked()
-                    && !self.custom_color_hex.trim().is_empty()
                 {
                     let hex = self.custom_color_hex.trim().to_string();
-                    self.wrap_selection_or_insert("[", "カスタム色", &format!("]{{color:{hex}}}"));
+                    if is_valid_hex_color(&hex) {
+                        self.wrap_selection_or_insert("[", "カスタム色", &format!("]{{color:{hex}}}"));
+                    } else {
+                        self.status_message =
+                            format!("無効なカラーコードです（#rrggbb 形式で入力してください）: {hex}");
+                    }
                 }
 
                 ui.separator();
@@ -1469,6 +1513,14 @@ impl eframe::App for TyperApp {
                             ui.label(RichText::new(format!("{match_count} 件")).small().weak());
 
                             if ui
+                                .checkbox(&mut self.find_ignore_case, "Aa")
+                                .on_hover_text("大文字・小文字を区別しない")
+                                .changed()
+                            {
+                                self.current_match_index = 0;
+                            }
+
+                            if ui
                                 .add_enabled(match_count > 0, egui::Button::new("◀ 前へ").small())
                                 .clicked()
                             {
@@ -1570,6 +1622,13 @@ impl eframe::App for TyperApp {
                 });
         });
     }
+}
+
+/// `#rgb` または `#rrggbb` 形式のHEXカラーコードとして妥当かを検証する
+fn is_valid_hex_color(s: &str) -> bool {
+    s.starts_with('#')
+        && (s.len() == 4 || s.len() == 7)
+        && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// 文字インデックス (`chars()` の順番) をUTF-8バイトオフセットに変換する
@@ -1879,6 +1938,7 @@ mod tests {
             pending_cursor_selection: None,
             show_find_replace: false,
             find_query: String::new(),
+            find_ignore_case: false,
             replace_text: String::new(),
             current_match_index: 0,
             show_page_settings_bar: true,
@@ -2010,6 +2070,43 @@ mod tests {
         app.record_recent_file(Path::new("new.md"));
         assert_eq!(app.recent_files.len(), 8);
         assert_eq!(app.recent_files[0], PathBuf::from("new.md"));
+    }
+
+    #[test]
+    fn test_is_valid_hex_color() {
+        assert!(is_valid_hex_color("#1a73e8"));
+        assert!(is_valid_hex_color("#fff"));
+        assert!(!is_valid_hex_color("banana"));
+        assert!(!is_valid_hex_color("1a73e8"));
+        assert!(!is_valid_hex_color("#1a73e"));
+        assert!(!is_valid_hex_color("#1a73eg"));
+        assert!(!is_valid_hex_color(""));
+    }
+
+    #[test]
+    fn test_find_matches_ignore_case() {
+        let mut app = test_app("Hello world, HELLO Rust");
+        app.find_query = "hello".to_string();
+        app.find_ignore_case = true;
+        let matches = app.find_matches();
+        assert_eq!(matches, vec![(0, 5), (13, 18)]);
+    }
+
+    #[test]
+    fn test_find_matches_case_sensitive_by_default() {
+        let mut app = test_app("Hello world, HELLO Rust");
+        app.find_query = "hello".to_string();
+        assert!(app.find_matches().is_empty());
+    }
+
+    #[test]
+    fn test_replace_all_matches_ignore_case() {
+        let mut app = test_app("Hello world, HELLO Rust");
+        app.find_query = "hello".to_string();
+        app.find_ignore_case = true;
+        app.replace_text = "Hi".to_string();
+        app.replace_all_matches();
+        assert_eq!(app.markdown_text, "Hi world, Hi Rust");
     }
 
     #[test]
