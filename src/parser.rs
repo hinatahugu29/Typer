@@ -311,6 +311,13 @@ pub fn parse_document(input: &str) -> Document {
             Event::HardBreak => {
                 current_inlines.push(Inline::HardBreak);
             }
+            Event::InlineHtml(html) => {
+                // 表のセルなど1行でしか書けない箇所向けに、`<br>` をハードブレイクとして扱う
+                // （物理行をまたげる `\` 改行の代替として使える）
+                if is_br_tag(&html) {
+                    current_inlines.push(Inline::HardBreak);
+                }
+            }
             Event::Rule => {
                 pending_attrs = BlockAttributes::default();
                 push_block(
@@ -397,6 +404,14 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
     }
+}
+
+/// `<br>` / `<br/>` / `<br />` （大文字小文字を問わない）かどうかを判定する
+fn is_br_tag(html: &str) -> bool {
+    matches!(
+        html.trim().to_ascii_lowercase().as_str(),
+        "<br>" | "<br/>" | "<br />"
+    )
 }
 
 fn push_block(
@@ -1067,6 +1082,42 @@ line-height: 1.4
                 assert!(attrs.widths.is_none());
             }
             other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_br_tag_in_table_cell_becomes_hard_break() {
+        // 表のセルは1物理行でしか書けないため、`\` 改行の代わりに `<br>` を使えるようにする
+        let doc = parse_document("| A |\n| :--- |\n| 1行目<br>2行目 |\n");
+        match &doc.blocks[0] {
+            Block::Table { rows, .. } => {
+                assert_eq!(
+                    rows[0][0],
+                    vec![
+                        Inline::Text("1行目".to_string()),
+                        Inline::HardBreak,
+                        Inline::Text("2行目".to_string()),
+                    ]
+                );
+            }
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_br_tag_variants_all_recognized() {
+        for tag in ["<br>", "<br/>", "<br />", "<BR>", "<Br/>"] {
+            let src = format!("1行目{tag}2行目\n");
+            let doc = parse_document(&src);
+            match &doc.blocks[0] {
+                Block::Paragraph { content, .. } => {
+                    assert!(
+                        content.contains(&Inline::HardBreak),
+                        "{tag} should become a hard break: {content:?}"
+                    );
+                }
+                other => panic!("expected paragraph, got {other:?}"),
+            }
         }
     }
 

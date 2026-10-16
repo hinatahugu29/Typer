@@ -327,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn test_table_cell_br_tag_compiles_and_renders() {
+        // 表セル内の `<br>` がハードブレイクとして解釈され、Typstコンパイル・
+        // プレビュー描画・PDF出力までエラーなく通ることを確認する
+        let src = "| A | B |\n| :--- | :--- |\n| 1行目<br>2行目 | x |\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        assert!(typst_code.contains("1行目 \\ \n2行目"));
+
+        let mut engine = TypstEngine::new();
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("table with <br> should render without error");
+        assert!(!preview.pages.is_empty());
+
+        let pdf_bytes = engine
+            .export_pdf(&typst_code)
+            .expect("table with <br> should export to PDF without error");
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
     fn test_block_width_attribute_compiles_and_renders() {
         // {block-width: ...} 指定を含む文書が実際にTypstコンパイル・プレビュー描画・
         // PDF出力までエラーなく通ることを確認する（生成コード検証は typst_gen 側で実施済み）
