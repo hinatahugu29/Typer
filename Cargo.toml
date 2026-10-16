@@ -12,6 +12,7 @@ typst = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 typst-render = "0.15.1"
+typst-syntax = "0.15.1"
 rfd = "0.17.2"
 
 [profile.release]

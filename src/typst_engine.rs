@@ -11,6 +11,8 @@ use std::time::Instant;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, Source};
+use typst::WorldExt;
+use typst_syntax::DiagSpan;
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Scalar};
 use typst::{Library, LibraryExt, World};
@@ -84,11 +86,21 @@ impl TypstEngine {
                     if !msg.is_empty() {
                         msg.push('\n');
                     }
+                    if let Some(line) = self.span_to_line(err.span) {
+                        msg.push_str(&format!("[生成コード {line}行目] "));
+                    }
                     msg.push_str(&err.message);
                 }
                 Err(msg)
             }
         }
+    }
+
+    /// エラーのspanから、生成されたTypstソース上の1始まりの行番号を求める
+    fn span_to_line(&self, span: DiagSpan) -> Option<usize> {
+        let byte_offset = self.range(span)?.start;
+        let (line, _col) = self.main_source.lines().byte_to_line_column(byte_offset)?;
+        Some(line + 1)
     }
 
     /// プレビュー用の各ページ画像をメモリ上でレンダリングする
@@ -223,6 +235,25 @@ mod tests {
     use crate::parser::parse_document;
     use crate::sample::SAMPLE_DOCUMENT;
     use crate::typst_gen::generate_typst_source;
+
+    #[test]
+    fn test_compile_error_includes_generated_code_line_number() {
+        // ```typst フェンスで意図的に壊れたTypstコード（未閉包の角括弧）を渡し、
+        // コンパイルエラーのメッセージに生成コード上の行番号が含まれることを確認する
+        let src = "本文\n\n```typst\n#box[閉じていない\n```\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        let mut engine = TypstEngine::new();
+
+        let err = match engine.render_preview(&typst_code, 1.5) {
+            Err(e) => e,
+            Ok(_) => panic!("unbalanced bracket should fail to compile"),
+        };
+        assert!(
+            err.contains("[生成コード") && err.contains("行目]"),
+            "error message should include a generated-code line number: {err}"
+        );
+    }
 
     #[test]
     fn test_end_to_end_sample_document_render_and_pdf() {

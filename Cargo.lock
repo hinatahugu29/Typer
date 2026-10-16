@@ -4752,6 +4752,7 @@ dependencies = [
  "typst-layout",
  "typst-pdf",
  "typst-render",
+ "typst-syntax",
 ]
 
 [[package]]
