@@ -108,6 +108,13 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     background: #f8f9fa;
     border-left: 4px solid #80868b;
   }}
+  blockquote.boxed-quote {{
+    background: #ffffff;
+    border: 1px solid #9aa0a6;
+    border-radius: 4px;
+    border-left: 1px solid #9aa0a6;
+    padding: 0.8rem 1rem;
+  }}
   pre {{
     background: #f1f3f4;
     padding: 0.8rem 1rem;
@@ -271,7 +278,8 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         }
         Block::BlockQuote { blocks, attrs } => {
             let style = block_style_attr(attrs);
-            let _ = writeln!(out, "<blockquote{style}>");
+            let class_attr = if attrs.boxed { " class=\"boxed-quote\"" } else { "" };
+            let _ = writeln!(out, "<blockquote{class_attr}{style}>");
             for b in blocks {
                 render_html_block(out, b, base_dir);
             }
@@ -291,6 +299,13 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
                 out,
                 "<div class=\"raw-typst-note\"><p class=\"raw-typst-label\">⚠ Typstコード（HTML出力では実行されません。PDF出力時のみ反映されます）</p><pre><code>{}</code></pre></div>",
                 html_escape(code)
+            );
+        }
+        Block::Spacer { height } => {
+            let _ = writeln!(
+                out,
+                "<div style=\"height: {}\"></div>",
+                html_escape(height)
             );
         }
         Block::HorizontalRule => {
@@ -370,6 +385,9 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                 if let Some(bg) = &style.bg {
                     css.push(format!("background-color: {}", html_escape(bg)));
                 }
+                if style.underline {
+                    css.push("text-decoration: underline".to_string());
+                }
                 if css.is_empty() {
                     render_html_inlines(out, content, base_dir);
                 } else {
@@ -383,7 +401,11 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                 render_html_inlines(out, text, base_dir);
                 out.push_str("</a>");
             }
-            Inline::Image { alt, url } => {
+            Inline::Image { alt, url, width } => {
+                let width_style = width
+                    .as_ref()
+                    .map(|w| format!(" style=\"width: {}; max-width: 100%;\"", html_escape(w)))
+                    .unwrap_or_default();
                 let src_attr = if let Some(resolved) = resolve_local_image_path(url, base_dir) {
                     if let Ok(bytes) = std::fs::read(&resolved) {
                         let mime = match resolved
@@ -410,13 +432,13 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                 if alt.trim().is_empty() {
                     let _ = write!(
                         out,
-                        "<figure class=\"doc-image\"><img src=\"{src_attr}\" alt=\"\"></figure>"
+                        "<figure class=\"doc-image\"><img src=\"{src_attr}\" alt=\"\"{width_style}></figure>"
                     );
                 } else {
                     let escaped_alt = html_escape(alt.trim());
                     let _ = write!(
                         out,
-                        "<figure class=\"doc-image\"><img src=\"{src_attr}\" alt=\"{escaped_alt}\"><figcaption>{escaped_alt}</figcaption></figure>"
+                        "<figure class=\"doc-image\"><img src=\"{src_attr}\" alt=\"{escaped_alt}\"{width_style}><figcaption>{escaped_alt}</figcaption></figure>"
                     );
                 }
             }
@@ -557,6 +579,34 @@ mod tests {
         let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
         let html = generate_html(&doc);
         assert!(html.contains("<tr style=\"background-color: #fdf0e6\">"));
+    }
+
+    #[test]
+    fn test_underline_style_emits_text_decoration() {
+        let doc = parse_document("[下線]{underline}\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("text-decoration: underline"));
+    }
+
+    #[test]
+    fn test_image_width_attribute_emits_inline_style() {
+        let doc = parse_document("![図](does_not_exist.png){width: 50%}\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("style=\"width: 50%; max-width: 100%;\""));
+    }
+
+    #[test]
+    fn test_spacer_block_emits_height_div() {
+        let doc = parse_document(":::space 2em\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<div style=\"height: 2em\"></div>"));
+    }
+
+    #[test]
+    fn test_boxed_blockquote_emits_boxed_class() {
+        let doc = parse_document("{box}\n> 引用\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<blockquote class=\"boxed-quote\">"));
     }
 
     #[test]

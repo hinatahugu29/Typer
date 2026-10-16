@@ -17,6 +17,8 @@ use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Pars
 const ATTR_MARKER_PREFIX: &str = "@@TYPER_ATTR:";
 const ATTR_MARKER_SUFFIX: &str = "@@";
 const PAGEBREAK_MARKER: &str = "@@TYPER_PAGEBREAK@@";
+const SPACE_MARKER_PREFIX: &str = "@@TYPER_SPACE:";
+const SPACE_MARKER_SUFFIX: &str = "@@";
 
 /// 原稿テキスト全体を解析して内部文書モデル (`Document`) を返す
 pub fn parse_document(input: &str) -> Document {
@@ -179,6 +181,20 @@ pub fn parse_document(input: &str) -> Document {
                             parse_block_attributes_into(attr_str, &mut pending_attrs);
                             continue;
                         }
+                        if let Some(height) = trimmed
+                            .strip_prefix(SPACE_MARKER_PREFIX)
+                            .and_then(|s| s.strip_suffix(SPACE_MARKER_SUFFIX))
+                        {
+                            push_block(
+                                &mut blocks,
+                                &mut blockquote_blocks,
+                                in_blockquote,
+                                Block::Spacer {
+                                    height: height.to_string(),
+                                },
+                            );
+                            continue;
+                        }
                     }
 
                     let content = expand_custom_inlines(raw_inlines);
@@ -268,7 +284,7 @@ pub fn parse_document(input: &str) -> Document {
                             InlineContainer::Link(url) => Inline::Link { text: inner, url },
                             InlineContainer::Image(url) => {
                                 let alt = inlines_to_plain_text(&inner);
-                                Inline::Image { alt, url }
+                                Inline::Image { alt, url, width: None }
                             }
                         };
                         parent_inlines.push(wrapped);
@@ -540,6 +556,15 @@ fn preprocess_block_directives(body: &str) -> String {
             continue;
         }
 
+        if let Some(height) = parse_space_directive(trimmed) {
+            out.push('\n');
+            out.push_str(SPACE_MARKER_PREFIX);
+            out.push_str(&height);
+            out.push_str(SPACE_MARKER_SUFFIX);
+            out.push_str("\n\n");
+            continue;
+        }
+
         if is_standalone_block_attr_line(trimmed) {
             let inner = &trimmed[1..trimmed.len() - 1];
             out.push('\n');
@@ -557,6 +582,23 @@ fn preprocess_block_directives(body: &str) -> String {
     out
 }
 
+/// `:::space 1em` のような明示的な垂直空白指定行を解析し、高さの文字列を返す
+/// （値省略時は既定で "1em"）
+fn parse_space_directive(trimmed: &str) -> Option<String> {
+    let rest = trimmed
+        .strip_prefix(":::space")
+        .or_else(|| trimmed.strip_prefix("::: space"))?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let val = rest.trim();
+    if val.is_empty() {
+        Some("1em".to_string())
+    } else {
+        Some(val.to_string())
+    }
+}
+
 /// 単独行が `{widths: ...}` や `{align: right}` のようなブロック属性指定行かどうかを判定する
 fn is_standalone_block_attr_line(trimmed: &str) -> bool {
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') || trimmed.len() < 4 {
@@ -567,6 +609,11 @@ fn is_standalone_block_attr_line(trimmed: &str) -> bool {
     if inner.contains('|') || inner.contains('{') || inner.contains('}') {
         return false;
     }
+    // 単独のフラグ属性（コロンを持たないキーワード、例: `{box}`）
+    if inner.trim().eq_ignore_ascii_case("box") {
+        return true;
+    }
+
     // 先頭のキーを取り出してブロック属性キーワードかどうか確認
     let first_pair = inner.split(',').next().unwrap_or("");
     if let Some((k, _)) = first_pair.split_once(':') {
@@ -646,6 +693,8 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
                 }
                 _ => {}
             }
+        } else if part.eq_ignore_ascii_case("box") {
+            attrs.boxed = true;
         }
     }
 }
@@ -711,7 +760,66 @@ fn expand_custom_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
     if !text_buf.is_empty() {
         parse_inline_custom_spans(&text_buf, &mut out);
     }
+    attach_image_size_attrs(out)
+}
+
+/// `![alt](url){width: 50%}` のように画像直後に置かれたサイズ指定を画像ノードへ取り込む。
+/// この時点では画像とサイズ指定のテキストは別々の `Inline` として隣接しているため、
+/// 直後のテキストが `{width: ...}` / `{w: ...}` で始まっていれば取り込んで消費する。
+fn attach_image_size_attrs(inlines: Vec<Inline>) -> Vec<Inline> {
+    let mut out = Vec::with_capacity(inlines.len());
+    let mut iter = inlines.into_iter().peekable();
+
+    while let Some(inline) = iter.next() {
+        let Inline::Image { alt, url, width } = inline else {
+            out.push(inline);
+            continue;
+        };
+
+        let mut new_width = width;
+        let mut remainder = None;
+        if let Some(Inline::Text(next_text)) = iter.peek() {
+            if let Some((w, consumed)) = try_parse_image_size_attr(next_text) {
+                new_width = Some(w);
+                let rest = next_text[consumed..].to_string();
+                remainder = Some(rest);
+            }
+        }
+        if remainder.is_some() {
+            iter.next(); // サイズ指定を含んでいたテキストノードを消費する
+        }
+
+        out.push(Inline::Image {
+            alt,
+            url,
+            width: new_width,
+        });
+        if let Some(rest) = remainder {
+            if !rest.is_empty() {
+                out.push(Inline::Text(rest));
+            }
+        }
+    }
+
     out
+}
+
+/// 先頭が `{width: ...}` または `{w: ...}` であれば、指定値と消費したバイト数を返す
+fn try_parse_image_size_attr(text: &str) -> Option<(String, usize)> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    let close = text.find('}')?;
+    let inner = &text[1..close];
+    let low = inner.to_ascii_lowercase();
+    let rest = low
+        .strip_prefix("width:")
+        .or_else(|| low.strip_prefix("w:"))?;
+    let val = rest.trim();
+    if val.is_empty() {
+        return None;
+    }
+    Some((val.to_string(), close + 1))
 }
 
 fn parse_inline_custom_spans(text: &str, out: &mut Vec<Inline>) {
@@ -836,8 +944,11 @@ fn parse_inline_style(spec: &str) -> Option<InlineStyle> {
                 _ => {}
             }
         } else {
-            // ショートハンド: `{red}` や `{14pt}`
-            if let Some(c) = normalize_color(part) {
+            // ショートハンド: `{red}` や `{14pt}` / `{underline}`
+            let part_low = part.to_ascii_lowercase();
+            if part_low == "underline" || part_low == "u" || part == "下線" {
+                style.underline = true;
+            } else if let Some(c) = normalize_color(part) {
                 style.color = Some(c);
             } else if part.ends_with("pt") {
                 style.size = Some(part.to_string());
@@ -845,7 +956,7 @@ fn parse_inline_style(spec: &str) -> Option<InlineStyle> {
         }
     }
 
-    if style.color.is_some() || style.size.is_some() || style.bg.is_some() {
+    if style.color.is_some() || style.size.is_some() || style.bg.is_some() || style.underline {
         Some(style)
     } else {
         None
@@ -937,6 +1048,79 @@ line-height: 1.4
                 assert_eq!(attrs.header_bg.as_deref(), Some("#fdf0e6"));
             }
             other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_underline_shorthand_and_strikethrough() {
+        let doc = parse_document("[下線テキスト]{underline}、~~取り消し線~~\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => {
+                let has_underline = content.iter().any(|i| {
+                    matches!(i, Inline::Styled { style, .. } if style.underline)
+                });
+                let has_strike = content
+                    .iter()
+                    .any(|i| matches!(i, Inline::Strikethrough(_)));
+                assert!(has_underline, "underline span should be parsed: {content:?}");
+                assert!(has_strike, "strikethrough should be parsed: {content:?}");
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_size_attribute_attached_and_remainder_kept() {
+        let doc = parse_document("![図1](sample.png){width: 50%} 補足文\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => {
+                assert_eq!(content.len(), 2);
+                match &content[0] {
+                    Inline::Image { width, .. } => {
+                        assert_eq!(width.as_deref(), Some("50%"));
+                    }
+                    other => panic!("expected image, got {other:?}"),
+                }
+                match &content[1] {
+                    Inline::Text(t) => assert_eq!(t, " 補足文"),
+                    other => panic!("expected trailing text, got {other:?}"),
+                }
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_without_size_attribute_has_no_width() {
+        let doc = parse_document("![図1](sample.png)\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => match &content[0] {
+                Inline::Image { width, .. } => assert_eq!(*width, None),
+                other => panic!("expected image, got {other:?}"),
+            },
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_space_directive_with_and_without_value() {
+        let doc = parse_document(":::space 2em\n本文\n:::space\n");
+        match &doc.blocks[0] {
+            Block::Spacer { height } => assert_eq!(height, "2em"),
+            other => panic!("expected spacer, got {other:?}"),
+        }
+        match &doc.blocks[2] {
+            Block::Spacer { height } => assert_eq!(height, "1em"),
+            other => panic!("expected spacer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_boxed_blockquote_attribute() {
+        let doc = parse_document("{box}\n> 囲み枠の引用\n");
+        match &doc.blocks[0] {
+            Block::BlockQuote { attrs, .. } => assert!(attrs.boxed),
+            other => panic!("expected blockquote, got {other:?}"),
         }
     }
 

@@ -152,10 +152,17 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             for b in sub_blocks {
                 render_block(&mut inner, b, base_dir);
             }
-            let quote_code = format!(
-                "#block(width: 100%, fill: rgb(\"#f8f9fa\"), stroke: (left: 3pt + rgb(\"#80868b\")), inset: (x: 10pt, y: 8pt))[{}]",
-                inner.trim()
-            );
+            let quote_code = if attrs.boxed {
+                format!(
+                    "#block(width: 100%, fill: white, stroke: 0.8pt + rgb(\"#9aa0a6\"), radius: 4pt, inset: (x: 12pt, y: 10pt))[{}]",
+                    inner.trim()
+                )
+            } else {
+                format!(
+                    "#block(width: 100%, fill: rgb(\"#f8f9fa\"), stroke: (left: 3pt + rgb(\"#80868b\")), inset: (x: 10pt, y: 8pt))[{}]",
+                    inner.trim()
+                )
+            };
             wrap_with_block_attrs(out, &quote_code, attrs);
             out.push_str("\n\n");
         }
@@ -176,6 +183,10 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             // 上級者向け: エスケープせずTypstソースへそのまま埋め込む
             wrap_with_block_attrs(out, code, attrs);
             out.push_str("\n\n");
+        }
+        Block::Spacer { height } => {
+            let safe_height = sanitize_length(height, "1em");
+            let _ = writeln!(out, "#v({safe_height})\n");
         }
         Block::HorizontalRule => {
             out.push_str("#line(length: 100%, stroke: 0.6pt + rgb(\"#bdc1c6\"))\n\n");
@@ -338,6 +349,10 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                 let mut inner = String::new();
                 render_inlines(&mut inner, content, base_dir);
 
+                if style.underline {
+                    inner = format!("#underline[{inner}]");
+                }
+
                 let mut params = Vec::new();
                 if let Some(color) = &style.color {
                     params.push(format!("fill: rgb(\"{}\")", sanitize_color_hex(color)));
@@ -364,8 +379,8 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                 render_inlines(out, text, base_dir);
                 out.push(']');
             }
-            Inline::Image { alt, url } => {
-                render_image_inline(out, alt, url, base_dir);
+            Inline::Image { alt, url, width } => {
+                render_image_inline(out, alt, url, width.as_deref(), base_dir);
             }
             Inline::SoftBreak => {
                 out.push(' ');
@@ -377,17 +392,24 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
     }
 }
 
-fn render_image_inline(out: &mut String, alt: &str, url: &str, base_dir: Option<&Path>) {
+fn render_image_inline(
+    out: &mut String,
+    alt: &str,
+    url: &str,
+    width: Option<&str>,
+    base_dir: Option<&Path>,
+) {
     if let Some(resolved) = resolve_local_image_path(url, base_dir) {
         let vpath = encode_local_image_vpath(&resolved);
+        let safe_width = sanitize_length(width.unwrap_or("80%"), "80%");
         if alt.trim().is_empty() {
-            let _ = write!(out, "#image(\"/{vpath}\", width: 80%, fit: \"contain\")");
+            let _ = write!(out, "#image(\"/{vpath}\", width: {safe_width}, fit: \"contain\")");
         } else {
             let mut escaped_alt = String::new();
             escape_typst_text(&mut escaped_alt, alt.trim());
             let _ = write!(
                 out,
-                "#figure(image(\"/{vpath}\", width: 80%, fit: \"contain\"), caption: [{escaped_alt}])"
+                "#figure(image(\"/{vpath}\", width: {safe_width}, fit: \"contain\"), caption: [{escaped_alt}])"
             );
         }
     } else {
@@ -629,6 +651,67 @@ mod tests {
         let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
         let code = generate_typst_source(&doc);
         assert!(code.contains("fill: (_, y) => if y == 0 { rgb(\"#fdf0e6\") } else { none }"));
+    }
+
+    #[test]
+    fn test_underline_style_wraps_with_underline_call() {
+        let doc = parse_document("[下線]{underline}\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#underline["));
+    }
+
+    #[test]
+    fn test_image_width_attribute_overrides_default() {
+        let dir = std::env::temp_dir().join(format!(
+            "typer_test_img_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("sample.png");
+        std::fs::write(&img_path, b"not a real png, just needs to exist").unwrap();
+
+        let doc = parse_document("![図](sample.png){width: 50%}\n");
+        let code = generate_typst_source_with_base(&doc, Some(&dir));
+        assert!(code.contains("width: 50%"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_image_without_width_uses_default_80_percent() {
+        let dir = std::env::temp_dir().join(format!(
+            "typer_test_img2_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("sample.png");
+        std::fs::write(&img_path, b"not a real png, just needs to exist").unwrap();
+
+        let doc = parse_document("![図](sample.png)\n");
+        let code = generate_typst_source_with_base(&doc, Some(&dir));
+        assert!(code.contains("width: 80%"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_spacer_block_emits_v_call() {
+        let doc = parse_document(":::space 2em\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#v(2em)"));
+    }
+
+    #[test]
+    fn test_boxed_blockquote_uses_full_border_style() {
+        let doc = parse_document("{box}\n> 引用\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("stroke: 0.8pt + rgb(\"#9aa0a6\"), radius: 4pt"));
     }
 
     #[test]

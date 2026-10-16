@@ -84,6 +84,8 @@ pub struct BlockAttributes {
     pub color: Option<String>,
     /// 表のヘッダー行の背景色上書き（表ブロックのみ使用。例: "#fdf0e6"）
     pub header_bg: Option<String>,
+    /// 引用ブロックを左バー付きの塗りつぶしではなく、全周を罫線で囲んだボックス表示にする
+    pub boxed: bool,
 }
 
 impl BlockAttributes {
@@ -94,6 +96,7 @@ impl BlockAttributes {
             && self.font_size.is_none()
             && self.color.is_none()
             && self.header_bg.is_none()
+            && !self.boxed
     }
 }
 
@@ -132,6 +135,8 @@ pub enum Block {
     /// ` ```typst ` フェンスコードブロックによる上級者向けの生Typstコード直接挿入。
     /// 内容はエスケープせずそのままTypstソースへ埋め込まれる（HTML出力では評価不能のため注記表示のみ）。
     RawTypst { code: String, attrs: BlockAttributes },
+    /// `:::space 1em` 等で指定する明示的な垂直方向の空白ブロック
+    Spacer { height: String },
     HorizontalRule,
     PageBreak,
 }
@@ -144,6 +149,8 @@ pub struct InlineStyle {
     pub size: Option<String>,
     /// 背景ハイライト色
     pub bg: Option<String>,
+    /// 下線を表示するか
+    pub underline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +171,8 @@ pub enum Inline {
     Image {
         alt: String,
         url: String,
+        /// 画像の表示幅（例: "50%", "80mm"）。未指定時は既定の80%幅で表示
+        width: Option<String>,
     },
     SoftBreak,
     HardBreak,

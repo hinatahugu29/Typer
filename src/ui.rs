@@ -1300,6 +1300,13 @@ impl eframe::App for TyperApp {
                     self.wrap_selection_or_insert("*", "斜体", "*");
                 }
                 if ui
+                    .small_button("U 下線")
+                    .on_hover_text("選択範囲（または新規テキスト）に下線を引きます")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "下線テキスト", "]{underline}");
+                }
+                if ui
                     .small_button("🔴 赤文字")
                     .on_hover_text("選択範囲（または新規テキスト）を赤文字にします")
                     .clicked()
@@ -1384,7 +1391,7 @@ impl eframe::App for TyperApp {
                 }
                 if ui
                     .small_button("🖼 画像...")
-                    .on_hover_text("ローカル画像ファイルを選択してカーソル位置に挿入します（ドラッグ＆ドロップも可）")
+                    .on_hover_text("ローカル画像ファイルを選択してカーソル位置に挿入します（ドラッグ＆ドロップも可）。挿入後、![alt](path){width: 50%} のようにサイズ指定を追記できます")
                     .clicked()
                 {
                     self.action_insert_image_dialog();
@@ -1395,6 +1402,20 @@ impl eframe::App for TyperApp {
                     .clicked()
                 {
                     self.insert_at_cursor("\n:::pagebreak\n");
+                }
+                if ui
+                    .small_button("↕ 空白行")
+                    .on_hover_text("カーソル位置に明示的な垂直方向の空白を挿入します")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n:::space 1em\n");
+                }
+                if ui
+                    .small_button("🔲 囲み枠")
+                    .on_hover_text("カーソル位置に全周を罫線で囲んだボックスを挿入します")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
                 }
 
                 ui.separator();
