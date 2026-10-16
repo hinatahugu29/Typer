@@ -199,6 +199,8 @@ fn load_windows_japanese_fonts() -> Vec<Font> {
         "consolab.ttf",
         "arial.ttf",
         "arialbd.ttf",
+        // 絵文字（COLR形式。typst-renderが対応していない場合は無効)
+        "seguiemj.ttf",
     ];
 
     for filename in candidate_files {
@@ -246,6 +248,26 @@ mod tests {
         let html = generate_html(&doc);
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<colgroup>"));
+    }
+
+    #[test]
+    fn test_emoji_in_document_renders_without_error() {
+        // Segoe UI Emoji フォント追加後も、絵文字を含む文書が組版エラーなく
+        // プレビュー・PDF出力できることを確認する（実際のグリフ表示の目視確認は別途実施済み）
+        let src = "# 絵文字テスト\n\n📖 🕒 📂 通常の文字\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        let mut engine = TypstEngine::new();
+
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("Preview rendering with emoji should not fail");
+        assert!(!preview.pages.is_empty());
+
+        let pdf_bytes = engine
+            .export_pdf(&typst_code)
+            .expect("PDF export with emoji should not fail");
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
     }
 
     #[test]
