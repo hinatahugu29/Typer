@@ -791,22 +791,22 @@ impl eframe::App for TyperApp {
         }
 
         // グローバルショートカットキー処理
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)) {
             self.action_save_file(true);
-        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
             self.action_save_file(false);
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O)) {
             self.request_action(PendingAction::OpenFileDialog, &ctx);
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::N)) {
             self.request_action(PendingAction::NewFile, &ctx);
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::P)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::P)) {
             self.action_export_pdf();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F))
-            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::H))
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F))
+            || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::H))
         {
             self.show_find_replace = !self.show_find_replace;
         }
@@ -814,21 +814,21 @@ impl eframe::App for TyperApp {
         {
             self.show_find_replace = false;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::B)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
             self.wrap_selection_or_insert("**", "太字テキスト", "**");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::I)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::I)) {
             self.wrap_selection_or_insert("*", "斜体テキスト", "*");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Y)) {
             self.perform_redo();
-        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
             self.perform_undo();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::U)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::U)) {
             self.wrap_selection_or_insert("[", "下線テキスト", "]{underline}");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::D)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::D)) {
             self.toggle_dark_mode(&ctx);
         }
 
@@ -837,81 +837,81 @@ impl eframe::App for TyperApp {
             self.insert_at_cursor("<br>");
         }
         // 改ページ・空白行（Enter系の拡張）
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
             self.insert_at_cursor("\n:::pagebreak\n");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
             self.insert_at_cursor("\n:::space 1em\n");
         }
 
         // 文字色（Ctrl+Alt+数字）
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num1)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num1)) {
             self.wrap_selection_or_insert("[", "重要事項", "]{red}");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num2)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num2)) {
             self.wrap_selection_or_insert("[", "補足事項", "]{blue}");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num3)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num3)) {
             self.wrap_selection_or_insert("[", "正常", "]{green}");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num4)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num4)) {
             self.wrap_selection_or_insert("[", "注意", "]{orange}");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num5)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num5)) {
             self.wrap_selection_or_insert("[", "参考", "]{purple}");
         }
 
         // 挿入系（Ctrl+Alt+文字）
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::T)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::T)) {
             self.insert_at_cursor(
                 "\n{widths: 25%, 50%, 25%}\n| 項目 | 内容 | 備考 |\n| :--- | :--- | :--- |\n| サンプル | 内容を入力 | 備考 |\n",
             );
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::R)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::R)) {
             self.insert_at_cursor("\n{align: right}\n2026年10月16日\n");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::C)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::C)) {
             self.insert_at_cursor("\n{align: center, size: 15pt}\n**文書タイトル**\n");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::W)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::W)) {
             self.insert_at_cursor("\n{align: center, block-width: 60%}\n");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::L)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::L)) {
             self.insert_at_cursor("\n{line-height: 1.2}\n");
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::I)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::I)) {
             self.action_insert_image_dialog();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::B)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::B)) {
             self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
         }
 
         // 表示・出力系（Ctrl+Shift+文字 / Ctrl+記号）
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::E)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::E)) {
             self.action_export_html();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Y)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Y)) {
             self.show_typst_source = !self.show_typst_source;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::O)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O)) {
             self.show_outline_panel = !self.show_outline_panel;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Comma)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
             self.show_page_settings_bar = !self.show_page_settings_bar;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Plus))
-            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Equals))
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Plus))
+            || ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Equals))
         {
             self.zoom = (self.zoom + 0.15).clamp(0.5, 2.5);
             self.revision += 1;
             self.trigger_preview_update();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Minus)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Minus)) {
             self.zoom = (self.zoom - 0.15).clamp(0.5, 2.5);
             self.revision += 1;
             self.trigger_preview_update();
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Num0)) {
             self.zoom = 1.0;
             self.revision += 1;
             self.trigger_preview_update();
@@ -2014,6 +2014,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_shortcut_modifier_is_cross_platform_command_key() {
+        // 本アプリの全ショートカットは `Modifiers::CTRL` ではなく `Modifiers::COMMAND` で
+        // consume_key している（Mac対応）。egui はプラットフォームに応じて物理キー押下を
+        // 次のように解釈するため、どちらの環境でもショートカットが一致することを確認する：
+        //   Windows/Linuxで物理Ctrlを押す  → ctrl=true, command=true
+        //   Macで物理Cmdを押す             → mac_cmd=true, command=true
+        let windows_ctrl_pressed = Modifiers::CTRL | Modifiers::COMMAND;
+        let mac_cmd_pressed = Modifiers::MAC_CMD | Modifiers::COMMAND;
+
+        assert!(windows_ctrl_pressed.matches_logically(Modifiers::COMMAND));
+        assert!(mac_cmd_pressed.matches_logically(Modifiers::COMMAND));
+
+        // Macで物理Ctrl（コマンドキーではない）を押しても一致してはいけない
+        assert!(!Modifiers::CTRL.matches_logically(Modifiers::COMMAND));
     }
 
     #[test]
