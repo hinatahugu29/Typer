@@ -20,6 +20,7 @@ use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{parse_document, update_document_settings_in_markdown};
 use crate::sample::SAMPLE_DOCUMENT;
+use crate::templates::TEMPLATES;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
 use crate::typst_gen::generate_typst_source_with_base;
 
@@ -1216,6 +1217,29 @@ impl eframe::App for TyperApp {
                     .clicked()
                 {
                     self.insert_at_cursor("\n:::pagebreak\n");
+                }
+
+                ui.separator();
+
+                ui.menu_button("📋 テンプレート", |ui| {
+                    for (name, body) in TEMPLATES {
+                        if ui.button(*name).clicked() {
+                            self.insert_at_cursor(body);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("定型の業務文書（議事録・障害報告書など）をカーソル位置に挿入します");
+
+                if ui
+                    .small_button("🧩 Typstコード")
+                    .on_hover_text(
+                        "上級者向け：独自構文では表現できない組版をTypstコードで直接記述できます（HTML出力では評価されません）",
+                    )
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n```typst\n#line(length: 50%, stroke: 1pt)\n```\n");
                 }
             });
 

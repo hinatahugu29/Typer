@@ -4,6 +4,7 @@ mod html_export;
 mod model;
 mod parser;
 mod sample;
+mod templates;
 mod typst_engine;
 mod typst_gen;
 mod ui;

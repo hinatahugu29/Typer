@@ -139,6 +139,21 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     border-top: 1px solid var(--border-color);
     margin: 1.5em 0;
   }}
+  .raw-typst-note {{
+    margin: 1em 0;
+    border: 1px dashed #9aa0a6;
+    border-radius: 4px;
+    padding: 0.6rem 1rem;
+    background: #f8f9fa;
+  }}
+  .raw-typst-note .raw-typst-label {{
+    margin: 0 0 0.4em 0;
+    font-size: 0.85em;
+    color: #5f6368;
+  }}
+  .raw-typst-note pre {{
+    margin: 0;
+  }}
 </style>
 </head>
 <body>
@@ -263,6 +278,14 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         } => {
             let style = block_style_attr(attrs);
             let _ = writeln!(out, "<pre{style}><code>{}</code></pre>", html_escape(code));
+        }
+        Block::RawTypst { code, attrs: _ } => {
+            // HTML出力ではTypstコードを評価できないため、注記付きでソースをそのまま表示する
+            let _ = writeln!(
+                out,
+                "<div class=\"raw-typst-note\"><p class=\"raw-typst-label\">⚠ Typstコード（HTML出力では実行されません。PDF出力時のみ反映されます）</p><pre><code>{}</code></pre></div>",
+                html_escape(code)
+            );
         }
         Block::HorizontalRule => {
             out.push_str("<hr>\n");
@@ -490,5 +513,14 @@ mod tests {
         let html = generate_html(&doc);
         assert!(html.contains("style=\"color: #c5221f\""));
         assert!(html.contains("重要"));
+    }
+
+    #[test]
+    fn test_generate_html_raw_typst_block_shows_escaped_source_with_note() {
+        let doc = parse_document("```typst\n#line(length: 50%)\n```\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("raw-typst-note"));
+        assert!(html.contains("HTML出力では実行されません"));
+        assert!(html.contains("#line(length: 50%)"));
     }
 }

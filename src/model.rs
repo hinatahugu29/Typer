@@ -120,6 +120,9 @@ pub enum Block {
         code: String,
         attrs: BlockAttributes,
     },
+    /// ` ```typst ` フェンスコードブロックによる上級者向けの生Typstコード直接挿入。
+    /// 内容はエスケープせずそのままTypstソースへ埋め込まれる（HTML出力では評価不能のため注記表示のみ）。
+    RawTypst { code: String, attrs: BlockAttributes },
     HorizontalRule,
     PageBreak,
 }

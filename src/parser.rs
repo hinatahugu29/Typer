@@ -214,7 +214,11 @@ pub fn parse_document(input: &str) -> Document {
                 TagEnd::CodeBlock => {
                     if let Some((lang, attrs)) = in_code_block.take() {
                         let code = std::mem::take(&mut code_buffer);
-                        let block = Block::CodeBlock { lang, code, attrs };
+                        let block = if lang.as_deref() == Some("typst") {
+                            Block::RawTypst { code, attrs }
+                        } else {
+                            Block::CodeBlock { lang, code, attrs }
+                        };
                         push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
                     }
                 }
@@ -835,6 +839,31 @@ line-height: 1.4
                 assert_eq!(rows.len(), 1);
             }
             _ => panic!("Expected Table block"),
+        }
+    }
+
+    #[test]
+    fn test_typst_fenced_code_block_becomes_raw_typst_block() {
+        let doc = parse_document("```typst\n#line(length: 50%)\n```\n");
+        assert_eq!(doc.blocks.len(), 1);
+        match &doc.blocks[0] {
+            Block::RawTypst { code, .. } => {
+                assert!(code.contains("#line(length: 50%)"));
+            }
+            other => panic!("Expected RawTypst block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_other_fenced_code_block_stays_regular_code_block() {
+        let doc = parse_document("```rust\nfn main() {}\n```\n");
+        assert_eq!(doc.blocks.len(), 1);
+        match &doc.blocks[0] {
+            Block::CodeBlock { lang, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert!(code.contains("fn main()"));
+            }
+            other => panic!("Expected CodeBlock, got {other:?}"),
         }
     }
 }

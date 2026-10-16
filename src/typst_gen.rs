@@ -171,6 +171,11 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             wrap_with_block_attrs(out, &raw_block, attrs);
             out.push_str("\n\n");
         }
+        Block::RawTypst { code, attrs } => {
+            // 上級者向け: エスケープせずTypstソースへそのまま埋め込む
+            wrap_with_block_attrs(out, code, attrs);
+            out.push_str("\n\n");
+        }
         Block::HorizontalRule => {
             out.push_str("#line(length: 100%, stroke: 0.6pt + rgb(\"#bdc1c6\"))\n\n");
         }
@@ -587,5 +592,12 @@ mod tests {
         let doc = parse_document("価格は#100[税込]*です*\n");
         let code = generate_typst_source(&doc);
         assert!(!code.contains("価格は#100"));
+    }
+
+    #[test]
+    fn test_typst_fenced_code_block_passes_through_unescaped() {
+        let doc = parse_document("```typst\n#line(length: 50%, stroke: 1pt)\n```\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#line(length: 50%, stroke: 1pt)"));
     }
 }
