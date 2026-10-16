@@ -202,19 +202,47 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
   .toc .toc-level-4 {{ padding-left: 3.6em; }}
   .toc .toc-level-5 {{ padding-left: 4.8em; }}
   .toc .toc-level-6 {{ padding-left: 6em; }}
+  .doc-header, .doc-footer {{
+    font-size: 0.8em;
+    color: #5f6368;
+    padding: 0.4em 0;
+  }}
+  .doc-header {{
+    text-align: right;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 1em;
+  }}
+  .doc-footer {{
+    text-align: center;
+    border-top: 1px solid var(--border-color);
+    margin-top: 1em;
+  }}
 </style>
 </head>
 <body>
 <div class="container">
-{body}</div>
+{header}{body}{footer}</div>
 </body>
 </html>
 "#,
         font_family = font_family,
         font_size = html_escape(&s.font_size),
         line_height = s.line_height,
-        body = body
+        header = render_doc_header_footer("doc-header", s.header_text.as_deref()),
+        body = body,
+        footer = render_doc_header_footer("doc-footer", s.footer_text.as_deref()),
     )
+}
+
+/// 文書共通のヘッダー・フッター文字列をHTMLの一箇所に描画する（HTMLはページ概念を持たないため、
+/// PDFのような各ページ反復ではなく、文書全体の先頭・末尾に1回だけ表示する）
+fn render_doc_header_footer(class_name: &str, text: Option<&str>) -> String {
+    match text {
+        Some(t) if !t.is_empty() => {
+            format!("<div class=\"{class_name}\">{}</div>\n", html_escape(t))
+        }
+        _ => String::new(),
+    }
 }
 
 fn render_html_block(
@@ -783,6 +811,22 @@ mod tests {
         let doc = parse_document(":::toc\n\n本文のみの文書です。\n");
         let html = generate_html(&doc);
         assert!(!html.contains("class=\"toc\""));
+    }
+
+    #[test]
+    fn test_header_and_footer_text_render_once_at_document_ends() {
+        let doc = parse_document("---\nheader: 社内限定資料\nfooter: 社外秘\n---\n\n本文です。\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<div class=\"doc-header\">社内限定資料</div>"));
+        assert!(html.contains("<div class=\"doc-footer\">社外秘</div>"));
+    }
+
+    #[test]
+    fn test_no_header_footer_divs_when_unset() {
+        let doc = parse_document("本文のみ\n");
+        let html = generate_html(&doc);
+        assert!(!html.contains("<div class=\"doc-header\">"));
+        assert!(!html.contains("<div class=\"doc-footer\">"));
     }
 
     #[test]

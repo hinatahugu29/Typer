@@ -46,6 +46,10 @@ pub struct DocumentSettings {
     pub font_choice: FontChoice,
     /// 文書全体のアクセントカラー（見出し罫線・表ヘッダ・リンク等に反映。例: "#1a73e8"）
     pub accent_color: String,
+    /// 全ページ共通のヘッダー文字列（社名・資料名など。未指定時は非表示）
+    pub header_text: Option<String>,
+    /// 全ページ共通のフッター文字列（「社外秘」等の表記。未指定時は非表示）
+    pub footer_text: Option<String>,
 }
 
 impl Default for DocumentSettings {
@@ -58,6 +62,8 @@ impl Default for DocumentSettings {
             line_height: 1.5,
             font_choice: FontChoice::Gothic,
             accent_color: "#1a73e8".to_string(),
+            header_text: None,
+            footer_text: None,
         }
     }
 }

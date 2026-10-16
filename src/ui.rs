@@ -20,8 +20,6 @@ use crate::model::{FontChoice, Orientation};
 use crate::parser::{
     extract_headings_outline, parse_document, update_document_settings_in_markdown,
 };
-#[cfg(test)]
-use crate::sample::SAMPLE_DOCUMENT;
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
 use crate::typst_gen::generate_typst_source_with_base;

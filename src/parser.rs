@@ -13,6 +13,7 @@ use crate::model::{
     Orientation,
 };
 use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use std::fmt::Write;
 
 const ATTR_MARKER_PREFIX: &str = "@@TYPER_ATTR:";
 const ATTR_MARKER_SUFFIX: &str = "@@";
@@ -363,17 +364,25 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     let paper = settings.paper.to_ascii_uppercase();
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
 
-    format!(
-        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\naccent-color: {}\n---\n\n{}",
+    let mut frontmatter = format!(
+        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\naccent-color: {}\n",
         paper,
         orient,
         settings.margin,
         settings.font_size,
         settings.line_height,
         font,
-        settings.accent_color,
-        trimmed_body
-    )
+        settings.accent_color
+    );
+    if let Some(header) = &settings.header_text {
+        let _ = writeln!(frontmatter, "header: {header}");
+    }
+    if let Some(footer) = &settings.footer_text {
+        let _ = writeln!(frontmatter, "footer: {footer}");
+    }
+    frontmatter.push_str("---\n\n");
+    frontmatter.push_str(trimmed_body);
+    frontmatter
 }
 
 pub(crate) fn inlines_to_plain_text(inlines: &[Inline]) -> String {
@@ -544,6 +553,16 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                 "accent-color" | "accent" => {
                     if let Some(c) = normalize_color(val) {
                         settings.accent_color = c;
+                    }
+                }
+                "header" => {
+                    if !val.is_empty() {
+                        settings.header_text = Some(val.to_string());
+                    }
+                }
+                "footer" => {
+                    if !val.is_empty() {
+                        settings.footer_text = Some(val.to_string());
                     }
                 }
                 _ => {}
@@ -1077,6 +1096,25 @@ line-height: 1.4
 
         let regenerated = update_document_settings_in_markdown(src, &doc.settings);
         assert!(regenerated.contains("accent-color: #e37400"));
+    }
+
+    #[test]
+    fn test_frontmatter_header_and_footer_roundtrip() {
+        let src = "---\nheader: 社内限定資料\nfooter: 社外秘\n---\n\n本文\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.settings.header_text.as_deref(), Some("社内限定資料"));
+        assert_eq!(doc.settings.footer_text.as_deref(), Some("社外秘"));
+
+        let regenerated = update_document_settings_in_markdown(src, &doc.settings);
+        assert!(regenerated.contains("header: 社内限定資料"));
+        assert!(regenerated.contains("footer: 社外秘"));
+
+        // 設定変更の度に再生成されても、未指定ならheader/footer行自体が出ないことを確認する
+        let doc_without = parse_document("本文のみ\n");
+        let regenerated_without =
+            update_document_settings_in_markdown("本文のみ\n", &doc_without.settings);
+        assert!(!regenerated_without.contains("header:"));
+        assert!(!regenerated_without.contains("footer:"));
     }
 
     #[test]

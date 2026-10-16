@@ -39,6 +39,9 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
         }
     };
 
+    let header_footer_params =
+        page_header_footer_params(s.header_text.as_deref(), s.footer_text.as_deref());
+
     // ページ・基本組版設定プリアンブル
     let _ = writeln!(
         out,
@@ -46,7 +49,7 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
   paper: "{paper}",
   flipped: {flipped},
   margin: {margin},
-  numbering: "1 / 1",
+  numbering: "1 / 1",{header_footer_params}
 )
 #set text(
   font: {font_list},
@@ -549,6 +552,33 @@ pub fn decode_local_image_vpath(vpath_without_slash: &str) -> Option<PathBuf> {
     }
     let path_str = String::from_utf8(bytes).ok()?;
     Some(PathBuf::from(path_str))
+}
+
+/// `#set page(...)` に渡す `header:` / `footer:` 引数部分を組み立てる。
+/// フッター文字列を指定した場合も、既存のページ番号表示（左下実装の `numbering` と同等の
+/// "N / 総ページ数" 表示）を失わないよう、フッター文字列とページ番号を左右に並べて表示する。
+fn page_header_footer_params(header_text: Option<&str>, footer_text: Option<&str>) -> String {
+    let mut params = String::new();
+
+    if let Some(header) = header_text {
+        let mut safe = String::new();
+        escape_typst_text(&mut safe, header);
+        let _ = write!(
+            params,
+            "\n  header: align(right)[#text(size: 8pt, fill: rgb(\"#5f6368\"))[{safe}]],"
+        );
+    }
+
+    if let Some(footer) = footer_text {
+        let mut safe = String::new();
+        escape_typst_text(&mut safe, footer);
+        let _ = write!(
+            params,
+            "\n  footer: context [#grid(\n    columns: (1fr, 1fr),\n    align(left)[#text(size: 8pt, fill: rgb(\"#5f6368\"))[{safe}]],\n    align(right)[#text(size: 8pt, fill: rgb(\"#5f6368\"))[#counter(page).display() / #counter(page).final().at(0)]],\n  )],"
+        );
+    }
+
+    params
 }
 
 fn escape_typst_text(out: &mut String, text: &str) {

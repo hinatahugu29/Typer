@@ -327,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn test_header_and_footer_text_compiles_and_renders() {
+        // フロントマターの header:/footer: 指定が実際にTypstコンパイル・プレビュー描画・
+        // PDF出力までエラーなく通ることを確認する（footerはページ番号表示と併記される）
+        let src = "---\nheader: 社内限定資料\nfooter: 社外秘\n---\n\n# 第一章\n\n本文です。\n\n:::pagebreak\n\n# 第二章\n\n本文です。\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        assert!(typst_code.contains("header: align(right)"));
+        assert!(typst_code.contains("footer: context"));
+        assert!(typst_code.contains("社内限定資料"));
+        assert!(typst_code.contains("社外秘"));
+
+        let mut engine = TypstEngine::new();
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("document with header/footer should render without error");
+        assert_eq!(preview.pages.len(), 2, "pagebreak should produce 2 pages");
+
+        let pdf_bytes = engine
+            .export_pdf(&typst_code)
+            .expect("document with header/footer should export to PDF without error");
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
     fn test_toc_directive_compiles_and_renders() {
         // `:::toc` が Typst の #outline() 呼び出しに変換され、見出しを含む文書が
         // コンパイル・プレビュー描画・PDF出力までエラーなく通ることを確認する
