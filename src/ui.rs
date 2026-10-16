@@ -121,6 +121,8 @@ pub struct TyperApp {
     last_export_path: Option<PathBuf>,
     /// ダークモード表示が有効か（永続化される）
     dark_mode: bool,
+    /// 設定・履歴をディスクへ永続化するか（テスト時はユーザーの実設定を汚さないよう無効化する）
+    persist_settings: bool,
 }
 
 impl TyperApp {
@@ -174,14 +176,15 @@ impl TyperApp {
             }
         });
 
-        let initial_text = SAMPLE_DOCUMENT.to_string();
+        let recent_files = load_recent_files();
+        let (initial_text, initial_file, initial_status) = resolve_startup_document(&recent_files);
         let doc = parse_document(&initial_text);
         let typst_code = generate_typst_source_with_base(&doc, None);
 
         let mut app = Self {
             markdown_text: initial_text,
             last_typst_code: typst_code,
-            current_file: None,
+            current_file: initial_file,
             is_dirty: false,
             last_window_title: String::new(),
             undo_stack: Vec::new(),
@@ -207,14 +210,15 @@ impl TyperApp {
             last_error: None,
             zoom: 1.0,
             show_typst_source: false,
-            status_message: "準備完了 — サンプル報告書を読み込みました".to_string(),
+            status_message: initial_status,
             startup_visibility_ensured: false,
-            recent_files: load_recent_files(),
+            recent_files,
             last_autosave_time: Instant::now(),
             show_outline_panel: false,
             custom_color_hex: String::new(),
             last_export_path: None,
             dark_mode,
+            persist_settings: true,
         };
 
         app.trigger_preview_update();
@@ -382,7 +386,9 @@ impl TyperApp {
         self.recent_files.retain(|p| p != &path_buf);
         self.recent_files.insert(0, path_buf);
         self.recent_files.truncate(8);
-        save_recent_files(&self.recent_files);
+        if self.persist_settings {
+            save_recent_files(&self.recent_files);
+        }
     }
 
     /// 編集停止から一定時間が経過していれば自動保存バックアップを書き出す（失敗は無視）
@@ -473,7 +479,9 @@ impl TyperApp {
     fn toggle_dark_mode(&mut self, ctx: &egui::Context) {
         self.dark_mode = !self.dark_mode;
         setup_visual_theme(ctx, self.dark_mode);
-        save_dark_mode_setting(self.dark_mode);
+        if self.persist_settings {
+            save_dark_mode_setting(self.dark_mode);
+        }
     }
 
     fn action_export_html(&mut self) {
@@ -1944,6 +1952,29 @@ fn recent_files_store_path() -> Option<PathBuf> {
 }
 
 /// 保存されている最近使ったファイル一覧を読み込む（既に存在しないファイルは除外する）
+/// 起動時に表示する初期文書を決定する：直近に開いていたファイル（先頭）が読み込めればそれを、
+/// 読み込めない・1件もない場合はサンプル報告書を返す
+fn resolve_startup_document(recent_files: &[PathBuf]) -> (String, Option<PathBuf>, String) {
+    recent_files
+        .first()
+        .and_then(|path| {
+            std::fs::read_to_string(path).ok().map(|content| {
+                (
+                    content,
+                    Some(path.clone()),
+                    format!("前回のファイルを自動的に開きました: {}", path.display()),
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            (
+                SAMPLE_DOCUMENT.to_string(),
+                None,
+                "準備完了 — サンプル報告書を読み込みました".to_string(),
+            )
+        })
+}
+
 fn load_recent_files() -> Vec<PathBuf> {
     let Some(path) = recent_files_store_path() else {
         return Vec::new();
@@ -2133,6 +2164,7 @@ mod tests {
             custom_color_hex: String::new(),
             last_export_path: None,
             dark_mode: false,
+            persist_settings: false,
         }
     }
 
@@ -2233,6 +2265,41 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_startup_document_falls_back_to_sample_when_no_recent_files() {
+        let (text, file, status) = resolve_startup_document(&[]);
+        assert_eq!(text, SAMPLE_DOCUMENT);
+        assert!(file.is_none());
+        assert!(status.contains("サンプル"));
+    }
+
+    #[test]
+    fn test_resolve_startup_document_restores_most_recent_readable_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "typer_test_{}_{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("restore_me.md");
+        std::fs::write(&path, "前回の原稿の内容").unwrap();
+
+        let (text, file, status) = resolve_startup_document(&[path.clone()]);
+        assert_eq!(text, "前回の原稿の内容");
+        assert_eq!(file, Some(path.clone()));
+        assert!(status.contains("自動的に開きました"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_startup_document_falls_back_when_most_recent_file_is_missing() {
+        let missing = PathBuf::from("Z:\\does\\not\\exist\\typer_missing_test.md");
+        let (text, file, _status) = resolve_startup_document(&[missing]);
+        assert_eq!(text, SAMPLE_DOCUMENT);
+        assert!(file.is_none());
+    }
+
+    #[test]
     fn test_record_recent_file_dedups_and_moves_to_front() {
         let mut app = test_app("");
         app.recent_files = vec![PathBuf::from("a.md"), PathBuf::from("b.md")];
@@ -2252,6 +2319,23 @@ mod tests {
         app.record_recent_file(Path::new("new.md"));
         assert_eq!(app.recent_files.len(), 8);
         assert_eq!(app.recent_files[0], PathBuf::from("new.md"));
+    }
+
+    #[test]
+    fn test_test_app_does_not_persist_settings_to_real_appdata() {
+        // test_app() はユーザーの実際の %APPDATA%\Typer\ を汚染してはいけない
+        let mut app = test_app("");
+        assert!(!app.persist_settings);
+        app.record_recent_file(Path::new("should-not-be-saved.md"));
+        app.dark_mode = true; // toggle_dark_mode を経由しない直接変更なのでディスクには触れない
+        if let Some(path) = recent_files_store_path() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                assert!(
+                    !content.contains("should-not-be-saved.md"),
+                    "test_app での record_recent_file が実設定ファイルに書き込んでしまっている"
+                );
+            }
+        }
     }
 
     #[test]
