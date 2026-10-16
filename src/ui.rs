@@ -57,7 +57,23 @@ enum PendingAction {
     OpenFileDialog,
     LoadFilePath(PathBuf),
     CloseWindow,
+    CloseTab,
 }
+
+/// 非アクティブなタブの状態を丸ごと保持するスナップショット。
+/// アクティブなタブのスロットは常に `None`（実体は `TyperApp` 本体のフィールドにある）。
+#[derive(Clone)]
+struct TabSnapshot {
+    markdown_text: String,
+    current_file: Option<PathBuf>,
+    is_dirty: bool,
+    undo_stack: Vec<String>,
+    redo_stack: Vec<String>,
+    cursor_char_range: Option<(usize, usize)>,
+    last_export_path: Option<PathBuf>,
+}
+
+const BLANK_DOCUMENT_TEMPLATE: &str = "---\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n";
 
 pub struct TyperApp {
     /// 編集中の原稿テキスト
@@ -132,6 +148,12 @@ pub struct TyperApp {
     dark_mode: bool,
     /// 設定・履歴をディスクへ永続化するか（テスト時はユーザーの実設定を汚さないよう無効化する）
     persist_settings: bool,
+
+    /// 開いている全タブ。`tabs[active_tab]` は常に `None`（実体は本構造体の他フィールド）で、
+    /// それ以外は非アクティブなタブの状態一式を保持する
+    tabs: Vec<Option<TabSnapshot>>,
+    /// 現在アクティブなタブの `tabs` 内インデックス
+    active_tab: usize,
 }
 
 impl TyperApp {
@@ -228,6 +250,8 @@ impl TyperApp {
             last_export_path: None,
             dark_mode,
             persist_settings: true,
+            tabs: vec![None],
+            active_tab: 0,
         };
 
         app.trigger_preview_update();
@@ -340,16 +364,15 @@ impl TyperApp {
         }
     }
 
+    /// アクティブなタブに限らず、バックグラウンドの他タブも含めて未保存の変更があるか
+    fn any_unsaved_changes(&self) -> bool {
+        self.is_dirty || self.tabs.iter().flatten().any(|snapshot| snapshot.is_dirty)
+    }
+
     fn execute_pending_action(&mut self, action: PendingAction, ctx: &egui::Context) {
         match action {
             PendingAction::NewFile => {
-                self.undo_stack.clear();
-                self.redo_stack.clear();
-                self.markdown_text = "---\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n".to_string();
-                self.current_file = None;
-                self.is_dirty = false;
-                self.revision += 1;
-                self.trigger_preview_update();
+                self.reset_to_blank_document();
                 self.status_message = "新規文書を作成しました".to_string();
             }
             PendingAction::OpenFileDialog => {
@@ -367,7 +390,107 @@ impl TyperApp {
                 self.allow_immediate_close = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+            PendingAction::CloseTab => {
+                self.close_active_tab();
+            }
         }
+    }
+
+    /// 現在のアクティブ文書を、フロントマターの既定値を持つ空の新規文書にリセットする
+    /// （`PendingAction::NewFile` と「最後の1タブを閉じる」の両方から共有される）
+    fn reset_to_blank_document(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.markdown_text = BLANK_DOCUMENT_TEMPLATE.to_string();
+        self.current_file = None;
+        self.is_dirty = false;
+        self.cursor_char_range = None;
+        self.pending_cursor_selection = None;
+        self.last_export_path = None;
+        self.revision += 1;
+        self.trigger_preview_update();
+    }
+
+    /// 現在アクティブな文書の状態一式をスナップショットとして取り出す（タブ切替・新規タブ用）
+    fn snapshot_active_tab(&self) -> TabSnapshot {
+        TabSnapshot {
+            markdown_text: self.markdown_text.clone(),
+            current_file: self.current_file.clone(),
+            is_dirty: self.is_dirty,
+            undo_stack: self.undo_stack.clone(),
+            redo_stack: self.redo_stack.clone(),
+            cursor_char_range: self.cursor_char_range,
+            last_export_path: self.last_export_path.clone(),
+        }
+    }
+
+    /// スナップショットの内容を、現在アクティブな文書のフィールドへ復元する
+    fn load_tab_snapshot(&mut self, snapshot: TabSnapshot) {
+        self.undo_stack = snapshot.undo_stack;
+        self.redo_stack = snapshot.redo_stack;
+        self.markdown_text = snapshot.markdown_text;
+        self.current_file = snapshot.current_file;
+        self.is_dirty = snapshot.is_dirty;
+        self.cursor_char_range = snapshot.cursor_char_range;
+        self.pending_cursor_selection = snapshot.cursor_char_range;
+        self.last_export_path = snapshot.last_export_path;
+        self.last_typst_code.clear();
+        self.page_textures.clear();
+        self.last_error = None;
+        self.last_compile_ms = 0.0;
+        self.last_autosave_time = Instant::now();
+        self.revision += 1;
+        self.trigger_preview_update();
+    }
+
+    /// 指定インデックスのタブへ切り替える（現在のタブはバックグラウンドへ退避される）
+    fn switch_to_tab(&mut self, index: usize) {
+        if index == self.active_tab || index >= self.tabs.len() {
+            return;
+        }
+        let current = self.snapshot_active_tab();
+        self.tabs[self.active_tab] = Some(current);
+        let target = self.tabs[index]
+            .take()
+            .expect("非アクティブなタブのスロットは必ずSomeのはず");
+        self.load_tab_snapshot(target);
+        self.active_tab = index;
+    }
+
+    /// 現在のタブをバックグラウンドへ退避し、空の新規文書を新しいタブとして開く
+    fn open_new_tab(&mut self) {
+        let current = self.snapshot_active_tab();
+        self.tabs[self.active_tab] = Some(current);
+        self.tabs.push(None);
+        self.active_tab = self.tabs.len() - 1;
+        self.reset_to_blank_document();
+        self.status_message = "新規タブを作成しました".to_string();
+    }
+
+    /// アクティブなタブを閉じる。残り1枚の場合はタブ自体は閉じず、空の新規文書にリセットする
+    fn close_active_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.reset_to_blank_document();
+            self.status_message = "タブを閉じました（新規文書）".to_string();
+            return;
+        }
+        self.tabs.remove(self.active_tab);
+        let new_index = self.active_tab.min(self.tabs.len() - 1);
+        let snapshot = self.tabs[new_index]
+            .take()
+            .expect("残っているスロットは必ずSomeのはず（削除前にNoneは1つしかない）");
+        self.load_tab_snapshot(snapshot);
+        self.active_tab = new_index;
+        self.status_message = "タブを閉じました".to_string();
+    }
+
+    /// タブバーに表示する短い表示名（ファイル名、未保存なら「新規文書」）を返す
+    fn tab_display_title(current_file: &Option<PathBuf>) -> String {
+        current_file
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "新規文書".to_string())
     }
 
     fn load_file_from_path(&mut self, path: PathBuf) {
@@ -818,7 +941,7 @@ impl eframe::App for TyperApp {
 
         // ウィンドウの「×」ボタンによる終了要求のインターセプト（未保存保護）
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.is_dirty && !self.allow_immediate_close {
+            if self.any_unsaved_changes() && !self.allow_immediate_close {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.pending_action = Some(PendingAction::CloseWindow);
             }
@@ -918,6 +1041,14 @@ impl eframe::App for TyperApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::B)) {
             self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
+        }
+
+        // タブ操作（Ctrl+Alt系のショートカットより後に置き、誤って奪わないようにする）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
+            self.open_new_tab();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) {
+            self.request_action(PendingAction::CloseTab, &ctx);
         }
 
         // 表示・出力系（Ctrl+Shift+文字 / Ctrl+記号）
@@ -1507,6 +1638,57 @@ impl eframe::App for TyperApp {
 
         // 中央（左ペイン）：マークアップエディタ＆クイック挿入バー＆検索置換バー
         egui::CentralPanel::default().show(ui, |ui| {
+            // タブバー（複数文書の切り替え・新規タブ・タブを閉じる）
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+
+                let mut switch_to: Option<usize> = None;
+                let mut close_index: Option<usize> = None;
+
+                for i in 0..self.tabs.len() {
+                    let (title, is_dirty) = if i == self.active_tab {
+                        (
+                            Self::tab_display_title(&self.current_file),
+                            self.is_dirty,
+                        )
+                    } else {
+                        let snap = self.tabs[i].as_ref().expect("非アクティブタブはSomeのはず");
+                        (Self::tab_display_title(&snap.current_file), snap.is_dirty)
+                    };
+                    let dirty_mark = if is_dirty { "● " } else { "" };
+                    let label = format!("{dirty_mark}{title}");
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if ui.selectable_label(i == self.active_tab, label).clicked() && i != self.active_tab {
+                            switch_to = Some(i);
+                        }
+                        if ui.small_button("×").on_hover_text("このタブを閉じます").clicked() {
+                            close_index = Some(i);
+                        }
+                    });
+                }
+
+                if ui
+                    .small_button("＋")
+                    .on_hover_text("新規タブを開きます (Ctrl+T)")
+                    .clicked()
+                {
+                    self.open_new_tab();
+                }
+
+                if let Some(i) = switch_to {
+                    self.switch_to_tab(i);
+                }
+                if let Some(i) = close_index {
+                    if i != self.active_tab {
+                        self.switch_to_tab(i);
+                    }
+                    self.request_action(PendingAction::CloseTab, &ui.ctx().clone());
+                }
+            });
+            ui.separator();
+
             // 書式・要素クイック挿入バー（カーソル位置への挿入・選択テキストのラップに対応）
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
@@ -1891,7 +2073,110 @@ mod tests {
             last_export_path: None,
             dark_mode: false,
             persist_settings: false,
+            tabs: vec![None],
+            active_tab: 0,
         }
+    }
+
+    #[test]
+    fn test_open_new_tab_preserves_previous_tab_content() {
+        let mut app = test_app("1番目のタブの内容");
+        app.is_dirty = true;
+        assert_eq!(app.tabs.len(), 1);
+
+        app.open_new_tab();
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.markdown_text, BLANK_DOCUMENT_TEMPLATE);
+        assert!(!app.is_dirty, "新規タブはクリーンな状態で始まる");
+        // 退避された1番目のタブの内容が保持されていることを確認
+        let snap0 = app.tabs[0].as_ref().unwrap();
+        assert_eq!(snap0.markdown_text, "1番目のタブの内容");
+        assert!(snap0.is_dirty);
+    }
+
+    #[test]
+    fn test_switch_to_tab_swaps_content_both_ways() {
+        let mut app = test_app("タブA");
+        app.open_new_tab();
+        app.markdown_text = "タブB".to_string();
+
+        app.switch_to_tab(0);
+        assert_eq!(app.markdown_text, "タブA");
+        assert_eq!(app.active_tab, 0);
+
+        app.switch_to_tab(1);
+        assert_eq!(app.markdown_text, "タブB");
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn test_switch_to_same_tab_is_a_no_op() {
+        let mut app = test_app("内容");
+        app.switch_to_tab(0);
+        assert_eq!(app.markdown_text, "内容");
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn test_close_last_remaining_tab_resets_to_blank_instead_of_removing() {
+        let mut app = test_app("内容");
+        app.is_dirty = true;
+        assert_eq!(app.tabs.len(), 1);
+
+        app.close_active_tab();
+
+        assert_eq!(app.tabs.len(), 1, "最後の1枚は閉じずに残る");
+        assert_eq!(app.markdown_text, BLANK_DOCUMENT_TEMPLATE);
+        assert!(!app.is_dirty);
+    }
+
+    #[test]
+    fn test_close_active_tab_activates_neighboring_tab() {
+        let mut app = test_app("タブA");
+        app.open_new_tab();
+        app.markdown_text = "タブB".to_string();
+        app.open_new_tab();
+        app.markdown_text = "タブC".to_string();
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.active_tab, 2);
+
+        // 中央(タブB)に切り替えてから閉じる
+        app.switch_to_tab(1);
+        assert_eq!(app.markdown_text, "タブB");
+        app.close_active_tab();
+
+        assert_eq!(app.tabs.len(), 2);
+        // タブBを閉じた後はタブCがアクティブになる（スライドしてきた側）
+        assert_eq!(app.markdown_text, "タブC");
+
+        // 残りのタブAが引き続き保持されていることを確認
+        app.switch_to_tab(0);
+        assert_eq!(app.markdown_text, "タブA");
+    }
+
+    #[test]
+    fn test_any_unsaved_changes_detects_dirty_background_tab() {
+        let mut app = test_app("内容");
+        app.is_dirty = false;
+        app.open_new_tab();
+        assert!(!app.is_dirty);
+        // アクティブタブはクリーンでも、裏に退避したタブが未保存ならtrueを返す
+        app.tabs[0].as_mut().unwrap().is_dirty = true;
+        assert!(app.any_unsaved_changes());
+
+        app.tabs[0].as_mut().unwrap().is_dirty = false;
+        assert!(!app.any_unsaved_changes());
+    }
+
+    #[test]
+    fn test_tab_display_title_uses_file_name_or_placeholder() {
+        assert_eq!(
+            TyperApp::tab_display_title(&Some(PathBuf::from(r"C:\docs\report.md"))),
+            "report.md"
+        );
+        assert_eq!(TyperApp::tab_display_title(&None), "新規文書");
     }
 
     #[test]
