@@ -1955,8 +1955,9 @@ impl eframe::App for TyperApp {
             ui.separator();
 
             // カスタムシンタックスハイライト付きエディタ
+            let dark_mode = self.dark_mode;
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-                let mut layout_job = highlight_custom_markdown(text.as_str());
+                let mut layout_job = highlight_custom_markdown(text.as_str(), dark_mode);
                 layout_job.wrap.max_width = wrap_width;
                 ui.fonts_mut(|f| f.layout_job(layout_job))
             };
@@ -2014,9 +2015,28 @@ mod tests {
 
     #[test]
     fn test_highlight_japanese_sample_document() {
-        let job = highlight_custom_markdown(SAMPLE_DOCUMENT);
+        let job = highlight_custom_markdown(SAMPLE_DOCUMENT, false);
         assert_eq!(job.text, SAMPLE_DOCUMENT);
         assert!(!job.sections.is_empty());
+    }
+
+    #[test]
+    fn test_highlight_dark_mode_uses_light_enough_default_text_color() {
+        // ダークモードの既定文字色が、暗い背景上で十分な明るさ（視認性）を持つことを確認する。
+        // 以前はライトモード用のほぼ黒に近い色（rgb 32,33,36）を使い回しており、
+        // ダーク背景上でほぼ読めなくなっていた。
+        let job = highlight_custom_markdown("通常のテキスト\n", true);
+        let color = job
+            .sections
+            .first()
+            .expect("少なくとも1区間はあるはず")
+            .format
+            .color;
+        let brightness = color.r() as u32 + color.g() as u32 + color.b() as u32;
+        assert!(
+            brightness > 400,
+            "ダークモードの既定文字色が暗すぎます: {color:?}"
+        );
     }
 
     #[test]
@@ -2416,7 +2436,7 @@ mod tests {
             // 1フレームあたり実際に走る「シンタックスハイライトの再計算」コスト
             let start = Instant::now();
             for _ in 0..30 {
-                let _ = highlight_custom_markdown(&text);
+                let _ = highlight_custom_markdown(&text, false);
             }
             let highlight_30frames = start.elapsed();
 

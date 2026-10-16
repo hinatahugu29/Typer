@@ -44,42 +44,83 @@ pub(crate) fn char_idx_to_line_col(s: &str, char_idx: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// シンタックスハイライトの配色セット（ライト/ダークモードで切り替える）
+struct HighlightPalette {
+    default_color: Color32,
+    heading_color: Color32,
+    attr_color: Color32,
+    attr_bg: Color32,
+    pagebreak_color: Color32,
+    pagebreak_bg: Color32,
+    frontmatter_color: Color32,
+    table_pipe_color: Color32,
+}
+
+impl HighlightPalette {
+    fn for_theme(dark_mode: bool) -> Self {
+        if dark_mode {
+            Self {
+                default_color: Color32::from_rgb(222, 224, 227),
+                heading_color: Color32::from_rgb(130, 177, 255),
+                attr_color: Color32::from_rgb(216, 160, 255),
+                attr_bg: Color32::from_rgb(58, 46, 71),
+                pagebreak_color: Color32::from_rgb(255, 171, 92),
+                pagebreak_bg: Color32::from_rgb(66, 50, 26),
+                frontmatter_color: Color32::from_rgb(129, 201, 149),
+                table_pipe_color: Color32::from_rgb(130, 177, 255),
+            }
+        } else {
+            Self {
+                default_color: Color32::from_rgb(32, 33, 36),
+                heading_color: Color32::from_rgb(23, 78, 166),
+                attr_color: Color32::from_rgb(147, 52, 230),
+                attr_bg: Color32::from_rgb(248, 242, 254),
+                pagebreak_color: Color32::from_rgb(227, 116, 0),
+                pagebreak_bg: Color32::from_rgb(254, 247, 224),
+                frontmatter_color: Color32::from_rgb(13, 101, 45),
+                table_pipe_color: Color32::from_rgb(26, 115, 232),
+            }
+        }
+    }
+}
+
 /// 標準Markdownおよび独自拡張構文（`{widths: ...}`, `[...]{red}`, `:::pagebreak` 等）の
-/// シンタックスハイライトを行う
-pub(crate) fn highlight_custom_markdown(text: &str) -> LayoutJob {
+/// シンタックスハイライトを行う（`dark_mode` に応じて配色を切り替える）
+pub(crate) fn highlight_custom_markdown(text: &str, dark_mode: bool) -> LayoutJob {
     let mut job = LayoutJob::default();
     let font_id = egui::FontId::new(14.5, FontFamily::Monospace);
+    let palette = HighlightPalette::for_theme(dark_mode);
 
     let default_fmt = TextFormat {
         font_id: font_id.clone(),
-        color: Color32::from_rgb(32, 33, 36),
+        color: palette.default_color,
         ..Default::default()
     };
     let heading_fmt = TextFormat {
         font_id: egui::FontId::new(15.0, FontFamily::Monospace),
-        color: Color32::from_rgb(23, 78, 166),
+        color: palette.heading_color,
         ..Default::default()
     };
     let attr_fmt = TextFormat {
         font_id: font_id.clone(),
-        color: Color32::from_rgb(147, 52, 230),
-        background: Color32::from_rgb(248, 242, 254),
+        color: palette.attr_color,
+        background: palette.attr_bg,
         ..Default::default()
     };
     let pagebreak_fmt = TextFormat {
         font_id: font_id.clone(),
-        color: Color32::from_rgb(227, 116, 0),
-        background: Color32::from_rgb(254, 247, 224),
+        color: palette.pagebreak_color,
+        background: palette.pagebreak_bg,
         ..Default::default()
     };
     let frontmatter_fmt = TextFormat {
         font_id: font_id.clone(),
-        color: Color32::from_rgb(13, 101, 45),
+        color: palette.frontmatter_color,
         ..Default::default()
     };
     let table_pipe_fmt = TextFormat {
         font_id: font_id.clone(),
-        color: Color32::from_rgb(26, 115, 232),
+        color: palette.table_pipe_color,
         ..Default::default()
     };
 
