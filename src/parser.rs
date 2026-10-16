@@ -17,6 +17,7 @@ use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Pars
 const ATTR_MARKER_PREFIX: &str = "@@TYPER_ATTR:";
 const ATTR_MARKER_SUFFIX: &str = "@@";
 const PAGEBREAK_MARKER: &str = "@@TYPER_PAGEBREAK@@";
+const TOC_MARKER: &str = "@@TYPER_TOC@@";
 const SPACE_MARKER_PREFIX: &str = "@@TYPER_SPACE:";
 const SPACE_MARKER_SUFFIX: &str = "@@";
 
@@ -171,6 +172,16 @@ pub fn parse_document(input: &str) -> Document {
                                 &mut blockquote_blocks,
                                 in_blockquote,
                                 Block::PageBreak,
+                            );
+                            continue;
+                        }
+                        if trimmed == TOC_MARKER {
+                            pending_attrs = BlockAttributes::default();
+                            push_block(
+                                &mut blocks,
+                                &mut blockquote_blocks,
+                                in_blockquote,
+                                Block::TableOfContents,
                             );
                             continue;
                         }
@@ -365,7 +376,7 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     )
 }
 
-fn inlines_to_plain_text(inlines: &[Inline]) -> String {
+pub(crate) fn inlines_to_plain_text(inlines: &[Inline]) -> String {
     let mut s = String::new();
     for inline in inlines {
         match inline {
@@ -571,6 +582,16 @@ fn preprocess_block_directives(body: &str) -> String {
         {
             out.push('\n');
             out.push_str(PAGEBREAK_MARKER);
+            out.push_str("\n\n");
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case(":::toc")
+            || trimmed.eq_ignore_ascii_case("{toc}")
+            || trimmed.eq_ignore_ascii_case("::: toc")
+        {
+            out.push('\n');
+            out.push_str(TOC_MARKER);
             out.push_str("\n\n");
             continue;
         }
@@ -1122,6 +1143,21 @@ line-height: 1.4
                 }
                 other => panic!("expected paragraph, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn test_toc_directive_variants_parsed_as_table_of_contents_block() {
+        for directive in [":::toc", "{toc}", "::: toc", ":::TOC"] {
+            let src = format!("# 見出し\n\n{directive}\n\n## 次の見出し\n");
+            let doc = parse_document(&src);
+            assert!(
+                doc.blocks
+                    .iter()
+                    .any(|b| matches!(b, Block::TableOfContents)),
+                "{directive} should produce a TableOfContents block: {:?}",
+                doc.blocks
+            );
         }
     }
 

@@ -327,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn test_toc_directive_compiles_and_renders() {
+        // `:::toc` が Typst の #outline() 呼び出しに変換され、見出しを含む文書が
+        // コンパイル・プレビュー描画・PDF出力までエラーなく通ることを確認する
+        let src = "# 第一章\n\n:::toc\n\n## 第一節\n\n本文です。\n\n## 第二節\n\n本文です。\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        assert!(typst_code.contains("#outline(depth: 3)"));
+
+        let mut engine = TypstEngine::new();
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("document with :::toc should render without error");
+        assert!(!preview.pages.is_empty());
+
+        let pdf_bytes = engine
+            .export_pdf(&typst_code)
+            .expect("document with :::toc should export to PDF without error");
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
     fn test_table_cell_whole_bg_compiles_and_renders() {
         // `[セル全体]{bg: ...}` によるセル単位の完全な塗りつぶしが
         // Typstコンパイル・プレビュー描画・PDF出力までエラーなく通ることを確認する

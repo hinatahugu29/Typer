@@ -16,8 +16,16 @@ pub fn generate_html(doc: &Document) -> String {
 pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> String {
     let mut body = String::with_capacity(4096);
 
+    let toc_entries = collect_toc_entries(&doc.blocks);
+    let mut heading_counter = 0usize;
     for block in &doc.blocks {
-        render_html_block(&mut body, block, base_dir);
+        render_html_block(
+            &mut body,
+            block,
+            base_dir,
+            &toc_entries,
+            &mut heading_counter,
+        );
     }
 
     let s = &doc.settings;
@@ -162,6 +170,38 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
   .raw-typst-note pre {{
     margin: 0;
   }}
+  .toc {{
+    margin: 1em 0 1.5em 0;
+    padding: 0.8rem 1.2rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: #f8f9fa;
+  }}
+  .toc .toc-title {{
+    margin: 0 0 0.5em 0;
+    font-weight: bold;
+    color: var(--accent-color);
+  }}
+  .toc ul {{
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }}
+  .toc li {{
+    margin: 0.25em 0;
+  }}
+  .toc li a {{
+    text-decoration: none;
+    color: var(--text-color);
+  }}
+  .toc li a:hover {{
+    text-decoration: underline;
+  }}
+  .toc .toc-level-2 {{ padding-left: 1.2em; }}
+  .toc .toc-level-3 {{ padding-left: 2.4em; }}
+  .toc .toc-level-4 {{ padding-left: 3.6em; }}
+  .toc .toc-level-5 {{ padding-left: 4.8em; }}
+  .toc .toc-level-6 {{ padding-left: 6em; }}
 </style>
 </head>
 <body>
@@ -177,7 +217,13 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     )
 }
 
-fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
+fn render_html_block(
+    out: &mut String,
+    block: &Block,
+    base_dir: Option<&Path>,
+    toc_entries: &[TocEntry],
+    heading_counter: &mut usize,
+) {
     match block {
         Block::Heading {
             level,
@@ -186,7 +232,12 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         } => {
             let lvl = (*level).clamp(1, 6);
             let style = block_style_attr(attrs);
-            let _ = write!(out, "<h{lvl}{style}>");
+            let id = toc_entries
+                .get(*heading_counter)
+                .map(|e| e.id.as_str())
+                .unwrap_or_default();
+            *heading_counter += 1;
+            let _ = write!(out, "<h{lvl} id=\"{id}\"{style}>");
             render_html_inlines(out, content, base_dir);
             let _ = writeln!(out, "</h{lvl}>");
         }
@@ -283,7 +334,7 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             };
             let _ = writeln!(out, "<blockquote{class_attr}{style}>");
             for b in blocks {
-                render_html_block(out, b, base_dir);
+                render_html_block(out, b, base_dir, toc_entries, heading_counter);
             }
             out.push_str("</blockquote>\n");
         }
@@ -312,7 +363,59 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         Block::PageBreak => {
             // 要件6.2: PDF専用の改ページ指定はHTML出力時に原則無視する
         }
+        Block::TableOfContents => {
+            render_toc(out, toc_entries);
+        }
     }
+}
+
+/// 目次に収録する見出しの情報（レベル・表示テキスト・対応する見出し要素のid）
+struct TocEntry {
+    level: u8,
+    text: String,
+    id: String,
+}
+
+/// 文書内の見出し（引用ブロック内も含む）を出現順に収集し、各見出しへ付与するidを採番する
+fn collect_toc_entries(blocks: &[Block]) -> Vec<TocEntry> {
+    let mut entries = Vec::new();
+    collect_toc_entries_into(blocks, &mut entries);
+    entries
+}
+
+fn collect_toc_entries_into(blocks: &[Block], out: &mut Vec<TocEntry>) {
+    for block in blocks {
+        match block {
+            Block::Heading { level, content, .. } => {
+                let id = format!("toc-heading-{}", out.len());
+                out.push(TocEntry {
+                    level: *level,
+                    text: crate::parser::inlines_to_plain_text(content),
+                    id,
+                });
+            }
+            Block::BlockQuote { blocks, .. } => collect_toc_entries_into(blocks, out),
+            _ => {}
+        }
+    }
+}
+
+/// `:::toc` 挿入位置に、見出し一覧への入れ子リンクリストとして目次を描画する
+fn render_toc(out: &mut String, toc_entries: &[TocEntry]) {
+    if toc_entries.is_empty() {
+        return;
+    }
+    out.push_str("<nav class=\"toc\">\n  <p class=\"toc-title\">目次</p>\n  <ul>\n");
+    for entry in toc_entries {
+        let indent_class = format!(" class=\"toc-level-{}\"", entry.level.clamp(1, 6));
+        let _ = writeln!(
+            out,
+            "    <li{indent_class}><a href=\"#{}\">{}</a></li>",
+            entry.id,
+            html_escape(&entry.text)
+        );
+    }
+    out.push_str("  </ul>\n</nav>\n");
 }
 
 fn block_style_attr(attrs: &BlockAttributes) -> String {
@@ -581,7 +684,7 @@ mod tests {
     fn test_generate_html_escapes_text_and_wraps_heading() {
         let doc = parse_document("# <タイトル>\n\n本文&説明\n");
         let html = generate_html(&doc);
-        assert!(html.contains("<h1>&lt;タイトル&gt;</h1>"));
+        assert!(html.contains("<h1 id=\"toc-heading-0\">&lt;タイトル&gt;</h1>"));
         assert!(html.contains("<p>本文&amp;説明</p>"));
     }
 
@@ -661,6 +764,25 @@ mod tests {
                 "<td style=\"background-color: #fff2cc; text-align: left\">全体塗り</td>"
             )
         );
+    }
+
+    #[test]
+    fn test_toc_directive_renders_linked_heading_list() {
+        let doc = parse_document("# 第一章\n\n:::toc\n\n## 第一節\n\n本文です。\n");
+        let html = generate_html(&doc);
+        // 見出し自体にidが付与され、目次はそのidへのアンカーリンクになっている
+        assert!(html.contains("<h1 id=\"toc-heading-0\">第一章</h1>"));
+        assert!(html.contains("<h2 id=\"toc-heading-1\">第一節</h2>"));
+        assert!(html.contains("<a href=\"#toc-heading-0\">第一章</a>"));
+        assert!(html.contains("<a href=\"#toc-heading-1\">第一節</a>"));
+        assert!(html.contains("class=\"toc-level-2\""));
+    }
+
+    #[test]
+    fn test_toc_directive_with_no_headings_renders_nothing() {
+        let doc = parse_document(":::toc\n\n本文のみの文書です。\n");
+        let html = generate_html(&doc);
+        assert!(!html.contains("class=\"toc\""));
     }
 
     #[test]

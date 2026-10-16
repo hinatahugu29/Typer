@@ -1599,6 +1599,13 @@ impl eframe::App for TyperApp {
                 {
                     self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
                 }
+                if ui
+                    .small_button("📑 目次")
+                    .on_hover_text("カーソル位置に見出し一覧から自動生成される目次を挿入します")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n:::toc\n\n");
+                }
 
                 ui.separator();
 

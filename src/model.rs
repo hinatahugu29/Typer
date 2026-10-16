@@ -147,6 +147,8 @@ pub enum Block {
     },
     HorizontalRule,
     PageBreak,
+    /// `:::toc` で挿入する目次。見出し一覧から自動生成される（PDF出力はページ番号付き）
+    TableOfContents,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

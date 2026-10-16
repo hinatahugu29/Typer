@@ -206,6 +206,9 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         Block::PageBreak => {
             out.push_str("#pagebreak(weak: true)\n\n");
         }
+        Block::TableOfContents => {
+            out.push_str("#outline(depth: 3)\n\n");
+        }
     }
 }
 
@@ -735,6 +738,13 @@ mod tests {
         let code = generate_typst_source(&doc);
         assert!(code.contains("table.cell(fill: rgb(\"#fff2cc\"))[全体塗り]"));
         assert!(!code.contains("#highlight"));
+    }
+
+    #[test]
+    fn test_toc_directive_generates_typst_outline_call() {
+        let doc = parse_document("# 見出し1\n\n:::toc\n\n## 見出し2\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#outline(depth: 3)"));
     }
 
     #[test]
