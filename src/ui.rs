@@ -102,10 +102,19 @@ pub struct TyperApp {
     show_typst_source: bool,
     /// ステータスバー通知メッセージ
     status_message: String,
+    /// eframe 0.37 Windowsの初期非表示デッドロック回避用フラグ
+    startup_visibility_ensured: bool,
 }
 
 impl TyperApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        if let Some(window) = cc.winit_window() {
+            window.set_visible(true);
+            window.focus_window();
+        }
+        cc.egui_ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        cc.egui_ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+
         setup_japanese_fonts(&cc.egui_ctx);
         setup_visual_theme(&cc.egui_ctx);
 
@@ -178,6 +187,7 @@ impl TyperApp {
             zoom: 1.0,
             show_typst_source: false,
             status_message: "準備完了 — サンプル報告書を読み込みました".to_string(),
+            startup_visibility_ensured: false,
         };
 
         app.trigger_preview_update();
@@ -642,6 +652,15 @@ impl TyperApp {
 }
 
 impl eframe::App for TyperApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.startup_visibility_ensured {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.startup_visibility_ensured = true;
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_worker_responses(&ctx);

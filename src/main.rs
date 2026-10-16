@@ -16,7 +16,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Typer — 軽量マークアップ報告書作成アプリ (MVP)")
             .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([800.0, 520.0]),
+            .with_min_inner_size([800.0, 520.0])
+            .with_visible(true),
         ..Default::default()
     };
 

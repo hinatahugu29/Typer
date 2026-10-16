@@ -190,24 +190,15 @@ fn load_windows_japanese_fonts() -> Vec<Font> {
         "BIZ-UDGothicB.ttc",
         "BIZ-UDMinchoM.ttc",
         // 游ゴシック / 游明朝
-        "YuGothR.ttc",
         "YuGothM.ttc",
         "YuGothB.ttc",
         "yumin.ttf",
         "yumindb.ttf",
-        // メイリオ
-        "meiryo.ttc",
-        "meiryob.ttc",
-        // MS ゴシック / 明朝（フォールバック）
-        "msgothic.ttc",
-        "msmincho.ttc",
         // コード用等幅・欧文フォント
         "consola.ttf",
         "consolab.ttf",
         "arial.ttf",
         "arialbd.ttf",
-        "times.ttf",
-        "timesbd.ttf",
     ];
 
     for filename in candidate_files {

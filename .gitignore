@@ -3,3 +3,4 @@
 *.pdb
 .DS_Store
 Thumbs.db
+startup_trace.log
