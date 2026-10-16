@@ -15,6 +15,7 @@ use eframe::egui::{
     text::{CCursor, CCursorRange},
 };
 
+use crate::docx_export::generate_docx_bytes;
 use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{
@@ -516,6 +517,39 @@ impl TyperApp {
                 }
                 Err(e) => {
                     self.status_message = format!("HTML書き込みエラー: {e}");
+                }
+            }
+        }
+    }
+
+    fn action_export_docx(&mut self) {
+        let default_name = self
+            .current_file
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s}.docx"))
+            .unwrap_or_else(|| "report.docx".to_string());
+
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Word文書 (*.docx)", &["docx"])
+            .set_file_name(&default_name)
+            .save_file()
+        {
+            let doc = parse_document(&self.markdown_text);
+            match generate_docx_bytes(&doc) {
+                Ok(bytes) => match std::fs::write(&path, bytes) {
+                    Ok(()) => {
+                        self.status_message =
+                            format!("Wordファイルを出力しました: {}", path.display());
+                        self.last_export_path = Some(path);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Word書き込みエラー: {e}");
+                    }
+                },
+                Err(e) => {
+                    self.status_message = format!("Word変換エラー: {e}");
                 }
             }
         }
@@ -1089,6 +1123,20 @@ impl eframe::App for TyperApp {
                         .clicked()
                     {
                         self.action_export_html();
+                    }
+
+                    let docx_btn = egui::Button::new(
+                        RichText::new("📝 Word出力...").color(Color32::from_rgb(23, 78, 166)),
+                    )
+                    .fill(Color32::from_rgb(232, 240, 254));
+                    if ui
+                        .add(docx_btn)
+                        .on_hover_text(
+                            "Microsoft Word (.docx) 形式で出力します（画像埋め込み・実クリックリンクは非対応。目次は右クリック→フィールド更新で表示）",
+                        )
+                        .clicked()
+                    {
+                        self.action_export_docx();
                     }
 
                     ui.separator();

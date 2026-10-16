@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod docx_export;
 mod html_export;
 mod model;
 mod parser;
