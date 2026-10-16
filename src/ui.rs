@@ -911,7 +911,9 @@ impl TyperApp {
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if matches!(ext.as_str(), "md" | "txt" | "markdown") {
-                self.request_action(PendingAction::LoadFilePath(path), ctx);
+                // ドロップされた文書は現在のタブを置き換えず、新規タブとして開く
+                self.open_new_tab();
+                self.load_file_from_path(path);
                 break;
             } else if matches!(
                 ext.as_str(),
@@ -2096,6 +2098,43 @@ mod tests {
             tabs: vec![None],
             active_tab: 0,
         }
+    }
+
+    #[test]
+    fn test_dropping_a_file_opens_it_in_a_new_tab_without_replacing_current() {
+        // handle_dropped_files() が .md ファイルに対して行うのと同じ処理列
+        // （open_new_tab() → load_file_from_path()）を検証する。
+        // egui::Context を要する handle_dropped_files 自体はヘッドレスでは呼べないため、
+        // その中核ロジックをここで直接検証する。
+        let dir = std::env::temp_dir().join(format!(
+            "typer_test_drop_{}_{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dropped.md");
+        std::fs::write(&path, "ドロップされた文書の内容").unwrap();
+
+        let mut app = test_app("現在編集中のタブの内容");
+        app.is_dirty = true;
+        app.current_file = Some(PathBuf::from("current.md"));
+
+        app.open_new_tab();
+        app.load_file_from_path(path.clone());
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.markdown_text, "ドロップされた文書の内容");
+        assert_eq!(app.current_file, Some(path));
+        assert!(!app.is_dirty, "読み込み直後は未保存扱いにならない");
+
+        // 退避された元のタブの内容がそのまま保持されていることを確認
+        app.switch_to_tab(0);
+        assert_eq!(app.markdown_text, "現在編集中のタブの内容");
+        assert_eq!(app.current_file, Some(PathBuf::from("current.md")));
+        assert!(app.is_dirty);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
