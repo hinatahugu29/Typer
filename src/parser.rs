@@ -326,8 +326,15 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
 
     format!(
-        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\n---\n\n{}",
-        paper, orient, settings.margin, settings.font_size, settings.line_height, font, trimmed_body
+        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\naccent-color: {}\n---\n\n{}",
+        paper,
+        orient,
+        settings.margin,
+        settings.font_size,
+        settings.line_height,
+        font,
+        settings.accent_color,
+        trimmed_body
     )
 }
 
@@ -488,6 +495,11 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                         settings.font_choice = FontChoice::Gothic;
                     }
                 }
+                "accent-color" | "accent" => {
+                    if let Some(c) = normalize_color(val) {
+                        settings.accent_color = c;
+                    }
+                }
                 _ => {}
             }
         }
@@ -568,6 +580,9 @@ fn is_standalone_block_attr_line(trimmed: &str) -> bool {
                 | "lineheight"
                 | "size"
                 | "font-size"
+                | "color"
+                | "c"
+                | "header-bg"
         )
     } else {
         false
@@ -619,10 +634,53 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
                         attrs.font_size = Some(val.to_string());
                     }
                 }
+                "color" | "c" => {
+                    if let Some(c) = normalize_color(val) {
+                        attrs.color = Some(c);
+                    }
+                }
+                "header-bg" => {
+                    if let Some(c) = normalize_color(val) {
+                        attrs.header_bg = Some(c);
+                    }
+                }
                 _ => {}
             }
         }
     }
+}
+
+/// 原稿テキストから見出し一覧を抽出する（アウトラインパネル用）。
+/// フェンスコードブロック内の `#` はコメント扱いで見出しとして拾わない。
+/// 戻り値は `(見出しレベル, 見出しテキスト, 行頭の文字インデックス)` のリスト。
+pub fn extract_headings_outline(text: &str) -> Vec<(u8, String, usize)> {
+    let mut result = Vec::new();
+    let mut in_fenced_code = false;
+    let mut char_offset = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let trimmed_start = trimmed.trim_start();
+
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_fenced_code = !in_fenced_code;
+        } else if !in_fenced_code && trimmed_start.starts_with('#') {
+            let level = trimmed_start.chars().take_while(|&c| c == '#').count();
+            if level >= 1
+                && level <= 6
+                && trimmed_start[level..].starts_with(|c: char| c == ' ' || c == '\t')
+            {
+                let title = trimmed_start[level..].trim().to_string();
+                if !title.is_empty() {
+                    result.push((level as u8, title, char_offset));
+                }
+            }
+        }
+
+        char_offset += line.chars().count();
+    }
+
+    result
 }
 
 /// インライン列の中の `Inline::Text` に含まれる独自インライン構文
@@ -852,6 +910,48 @@ line-height: 1.4
             }
             other => panic!("Expected RawTypst block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_frontmatter_accent_color_roundtrip() {
+        let src = "---\naccent-color: #e37400\n---\n\n本文\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.settings.accent_color, "#e37400");
+
+        let regenerated = update_document_settings_in_markdown(src, &doc.settings);
+        assert!(regenerated.contains("accent-color: #e37400"));
+    }
+
+    #[test]
+    fn test_block_color_and_header_bg_attributes_parsed() {
+        let src = "{color: red}\n段落本文\n\n{widths: 50%, 50%}\n{header-bg: #fdf0e6}\n| A | B |\n| :--- | :--- |\n| 1 | 2 |\n";
+        let doc = parse_document(src);
+        match &doc.blocks[0] {
+            Block::Paragraph { attrs, .. } => {
+                assert_eq!(attrs.color.as_deref(), Some("#c5221f"));
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+        match &doc.blocks[1] {
+            Block::Table { attrs, .. } => {
+                assert_eq!(attrs.header_bg.as_deref(), Some("#fdf0e6"));
+            }
+            other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_headings_outline_basic() {
+        let text = "# 見出し1\n本文\n## 見出し2\n```\n# コード内は見出しではない\n```\n### 見出し3\n";
+        let headings = extract_headings_outline(text);
+        assert_eq!(
+            headings,
+            vec![
+                (1, "見出し1".to_string(), 0),
+                (2, "見出し2".to_string(), 10),
+                (3, "見出し3".to_string(), 41),
+            ]
+        );
     }
 
     #[test]

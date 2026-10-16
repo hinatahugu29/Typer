@@ -27,6 +27,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
         }
         FontChoice::Mincho => r#""BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif"#,
     };
+    let accent_color = sanitize_color_hex(&s.accent_color);
 
     format!(
         r#"<!DOCTYPE html>
@@ -38,7 +39,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
 <style>
   :root {{
     --text-color: #202124;
-    --accent-color: #1a73e8;
+    --accent-color: {accent_color};
     --border-color: #dadce0;
     --table-border: #9aa0a6;
     --header-bg: #f1f3f4;
@@ -62,7 +63,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
   }}
   h1 {{
     font-size: 1.5em;
-    color: #174ea6;
+    color: var(--accent-color);
     border-bottom: 2px solid var(--accent-color);
     padding-bottom: 0.3em;
     margin-top: 1.5em;
@@ -241,7 +242,12 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
                 out.push_str("  </colgroup>\n");
             }
             if !headers.is_empty() {
-                out.push_str("  <thead>\n    <tr>\n");
+                let header_bg_style = attrs
+                    .header_bg
+                    .as_ref()
+                    .map(|c| format!(" style=\"background-color: {}\"", sanitize_color_hex(c)))
+                    .unwrap_or_default();
+                let _ = write!(out, "  <thead>\n    <tr{header_bg_style}>\n");
                 for (i, cell) in headers.iter().enumerate() {
                     let align_style = cell_align_attr(alignments.get(i).copied().flatten());
                     let _ = write!(out, "      <th{align_style}>");
@@ -311,6 +317,9 @@ fn block_style_attr(attrs: &BlockAttributes) -> String {
     }
     if let Some(size) = &attrs.font_size {
         rules.push(format!("font-size: {}", html_escape(size)));
+    }
+    if let Some(color) = &attrs.color {
+        rules.push(format!("color: {}", sanitize_color_hex(color)));
     }
     if rules.is_empty() {
         String::new()
@@ -442,6 +451,19 @@ fn encode_base64(input: &[u8]) -> String {
     out
 }
 
+/// `#xxxxxx` / `#xxx` 形式のみ許可し、不正な値は既定のアクセントカラーにフォールバックする
+fn sanitize_color_hex(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('#')
+        && (trimmed.len() == 4 || trimmed.len() == 7)
+        && trimmed[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        trimmed.to_string()
+    } else {
+        "#1a73e8".to_string()
+    }
+}
+
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -513,6 +535,28 @@ mod tests {
         let html = generate_html(&doc);
         assert!(html.contains("style=\"color: #c5221f\""));
         assert!(html.contains("重要"));
+    }
+
+    #[test]
+    fn test_accent_color_applied_to_css_variable() {
+        let src = "---\naccent-color: #8430ce\n---\n\n本文\n";
+        let doc = parse_document(src);
+        let html = generate_html(&doc);
+        assert!(html.contains("--accent-color: #8430ce;"));
+    }
+
+    #[test]
+    fn test_block_color_attribute_emits_css_color() {
+        let doc = parse_document("{color: red}\n段落\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("color: #c5221f"));
+    }
+
+    #[test]
+    fn test_table_header_bg_attribute_emits_inline_style() {
+        let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<tr style=\"background-color: #fdf0e6\">"));
     }
 
     #[test]

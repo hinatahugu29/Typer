@@ -28,6 +28,7 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     let margin = sanitize_length(&s.margin, "20mm");
     let font_size = sanitize_length(&s.font_size, "10.5pt");
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
+    let accent = sanitize_color_hex(&s.accent_color);
 
     let font_list = match s.font_choice {
         FontChoice::Gothic => {
@@ -63,15 +64,15 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
   width: 100%,
   above: 1.5em,
   below: 0.9em,
-  stroke: (bottom: 1.2pt + rgb("#1a73e8")),
+  stroke: (bottom: 1.2pt + rgb("{accent}")),
   inset: (bottom: 5pt),
-  text(size: 1.45em, weight: "bold", fill: rgb("#174ea6"), it.body)
+  text(size: 1.45em, weight: "bold", fill: rgb("{accent}"), it.body)
 )
 #show heading.where(level: 2): it => block(
   width: 100%,
   above: 1.35em,
   below: 0.7em,
-  stroke: (bottom: 0.7pt + rgb("#dadce0"), left: 3.5pt + rgb("#1a73e8")),
+  stroke: (bottom: 0.7pt + rgb("#dadce0"), left: 3.5pt + rgb("{accent}")),
   inset: (left: 7pt, bottom: 4pt, top: 2pt),
   text(size: 1.2em, weight: "bold", fill: rgb("#202124"), it.body)
 )
@@ -232,6 +233,14 @@ fn render_table(
         "#table(\n  columns: {columns_spec},\n  align: {align_spec}"
     );
 
+    if let Some(header_bg) = &attrs.header_bg {
+        let safe_bg = sanitize_color_hex(header_bg);
+        let _ = writeln!(
+            table_code,
+            "  fill: (_, y) => if y == 0 {{ rgb(\"{safe_bg}\") }} else {{ none }},"
+        );
+    }
+
     if !headers.is_empty() {
         table_code.push_str("  table.header(");
         for cell in headers.iter().take(col_count) {
@@ -278,6 +287,11 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
     if let Some(lh) = attrs.line_height {
         let leading_em = ((lh - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
         current = format!("#{{\n  set par(leading: {leading_em}em)\n  [{current}]\n}}");
+    }
+
+    if let Some(color) = &attrs.color {
+        let safe_color = sanitize_color_hex(color);
+        current = format!("#text(fill: rgb(\"{safe_color}\"))[{current}]");
     }
 
     if let Some(align) = attrs.align {
@@ -592,6 +606,29 @@ mod tests {
         let doc = parse_document("価格は#100[税込]*です*\n");
         let code = generate_typst_source(&doc);
         assert!(!code.contains("価格は#100"));
+    }
+
+    #[test]
+    fn test_accent_color_applied_to_heading_show_rules() {
+        let src = "---\naccent-color: #e37400\n---\n\n# 見出し\n";
+        let doc = parse_document(src);
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("rgb(\"#e37400\")"));
+        assert!(!code.contains("#1a73e8"));
+    }
+
+    #[test]
+    fn test_block_color_attribute_wraps_text_fill() {
+        let doc = parse_document("{color: red}\n段落\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#text(fill: rgb(\"#c5221f\"))"));
+    }
+
+    #[test]
+    fn test_table_header_bg_attribute_overrides_fill() {
+        let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("fill: (_, y) => if y == 0 { rgb(\"#fdf0e6\") } else { none }"));
     }
 
     #[test]

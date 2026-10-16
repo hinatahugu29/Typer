@@ -18,7 +18,7 @@ use eframe::egui::{
 
 use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
-use crate::parser::{parse_document, update_document_settings_in_markdown};
+use crate::parser::{extract_headings_outline, parse_document, update_document_settings_in_markdown};
 use crate::sample::SAMPLE_DOCUMENT;
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
@@ -105,6 +105,17 @@ pub struct TyperApp {
     status_message: String,
     /// eframe 0.37 Windowsの初期非表示デッドロック回避用フラグ
     startup_visibility_ensured: bool,
+
+    /// 最近使用したファイルの一覧（新しい順、永続化される）
+    recent_files: Vec<PathBuf>,
+    /// 自動保存の最終実行時刻
+    last_autosave_time: Instant,
+    /// 見出しアウトラインパネルの表示フラグ
+    show_outline_panel: bool,
+    /// カスタム文字色入力欄（HEXコード）
+    custom_color_hex: String,
+    /// 直近にエクスポートしたファイルのパス（「開く」ボタン用）
+    last_export_path: Option<PathBuf>,
 }
 
 impl TyperApp {
@@ -189,6 +200,11 @@ impl TyperApp {
             show_typst_source: false,
             status_message: "準備完了 — サンプル報告書を読み込みました".to_string(),
             startup_visibility_ensured: false,
+            recent_files: load_recent_files(),
+            last_autosave_time: Instant::now(),
+            show_outline_panel: false,
+            custom_color_hex: String::new(),
+            last_export_path: None,
         };
 
         app.trigger_preview_update();
@@ -342,10 +358,38 @@ impl TyperApp {
                 self.revision += 1;
                 self.trigger_preview_update();
                 self.status_message = format!("読み込み完了: {}", path.display());
+                self.record_recent_file(&path);
             }
             Err(e) => {
                 self.status_message = format!("ファイル読み込みエラー: {e}");
             }
+        }
+    }
+
+    /// 最近使ったファイル一覧の先頭に追加し、重複排除・件数上限・永続化を行う
+    fn record_recent_file(&mut self, path: &Path) {
+        let path_buf = path.to_path_buf();
+        self.recent_files.retain(|p| p != &path_buf);
+        self.recent_files.insert(0, path_buf);
+        self.recent_files.truncate(8);
+        save_recent_files(&self.recent_files);
+    }
+
+    /// 編集停止から一定時間が経過していれば自動保存バックアップを書き出す（失敗は無視）
+    fn maybe_autosave(&mut self) {
+        const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
+        if !self.is_dirty {
+            return;
+        }
+        if self.last_autosave_time.elapsed() < AUTOSAVE_INTERVAL {
+            return;
+        }
+        self.last_autosave_time = Instant::now();
+        if let Some(path) = autosave_path_for(&self.current_file) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, &self.markdown_text);
         }
     }
 
@@ -367,6 +411,7 @@ impl TyperApp {
                     self.revision += 1;
                     self.trigger_preview_update();
                     self.status_message = format!("保存しました: {}", path.display());
+                    self.record_recent_file(&path);
                     return true;
                 }
                 Err(e) => {
@@ -402,6 +447,7 @@ impl TyperApp {
                         let ms = start.elapsed().as_secs_f64() * 1000.0;
                         self.status_message =
                             format!("PDFを出力しました ({ms:.1} ms): {}", path.display());
+                        self.last_export_path = Some(path);
                     }
                     Err(e) => {
                         self.status_message = format!("PDF書き込みエラー: {e}");
@@ -434,10 +480,24 @@ impl TyperApp {
             match std::fs::write(&path, html) {
                 Ok(()) => {
                     self.status_message = format!("HTMLを出力しました: {}", path.display());
+                    self.last_export_path = Some(path);
                 }
                 Err(e) => {
                     self.status_message = format!("HTML書き込みエラー: {e}");
                 }
+            }
+        }
+    }
+
+    /// 直近にエクスポートしたファイルをOS既定のアプリケーションで開く
+    fn action_open_last_export(&mut self) {
+        if let Some(path) = &self.last_export_path {
+            let result = std::process::Command::new("cmd")
+                .args(["/C", "start", ""])
+                .arg(path)
+                .spawn();
+            if let Err(e) = result {
+                self.status_message = format!("ファイルを開けませんでした: {e}");
             }
         }
     }
@@ -717,6 +777,8 @@ impl eframe::App for TyperApp {
             self.last_edit_time = Instant::now();
         }
 
+        self.maybe_autosave();
+
         // デバウンスされたプレビュー更新チェック（入力停止から120ms後に組版開始）
         if self.pending_render {
             let elapsed = self.last_edit_time.elapsed();
@@ -782,6 +844,25 @@ impl eframe::App for TyperApp {
                     {
                         self.request_action(PendingAction::OpenFileDialog, &ctx);
                     }
+
+                    ui.menu_button("🕒 最近使ったファイル", |ui| {
+                        if self.recent_files.is_empty() {
+                            ui.label("（まだ履歴がありません）");
+                        } else {
+                            let candidates = self.recent_files.clone();
+                            for path in candidates {
+                                let label = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                                if ui.button(label).on_hover_text(path.to_string_lossy()).clicked() {
+                                    self.request_action(PendingAction::LoadFilePath(path), &ctx);
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+
                     if ui
                         .button("💾 保存")
                         .on_hover_text("ファイルを上書き保存します (Ctrl+S)")
@@ -826,6 +907,13 @@ impl eframe::App for TyperApp {
                         .clicked()
                     {
                         self.show_page_settings_bar = !self.show_page_settings_bar;
+                    }
+                    if ui
+                        .selectable_label(self.show_outline_panel, "🗂 アウトライン")
+                        .on_hover_text("見出し一覧パネルを開閉し、クリックで該当箇所へジャンプします")
+                        .clicked()
+                    {
+                        self.show_outline_panel = !self.show_outline_panel;
                     }
 
                     ui.separator();
@@ -968,6 +1056,24 @@ impl eframe::App for TyperApp {
                             doc_settings.line_height = lh;
                             changed = true;
                         }
+
+                        ui.separator();
+
+                        // アクセントカラー選択（見出し罫線・表ヘッダ・リンク色等に反映）
+                        ui.label(RichText::new("配色:").small());
+                        for (label, hex) in [
+                            ("青", "#1a73e8"),
+                            ("緑", "#188038"),
+                            ("赤", "#c5221f"),
+                            ("紫", "#8430ce"),
+                            ("橙", "#e37400"),
+                        ] {
+                            let is_selected = doc_settings.accent_color.eq_ignore_ascii_case(hex);
+                            if ui.selectable_label(is_selected, label).clicked() && !is_selected {
+                                doc_settings.accent_color = hex.to_string();
+                                changed = true;
+                            }
+                        }
                     });
 
                     if changed {
@@ -1032,6 +1138,17 @@ impl eframe::App for TyperApp {
 
                     ui.separator();
                     ui.label(RichText::new(&self.status_message).small().weak());
+
+                    if self.last_export_path.is_some() {
+                        ui.separator();
+                        if ui
+                            .small_button("📂 開く")
+                            .on_hover_text("直近に出力したファイルを既定のアプリで開きます")
+                            .clicked()
+                        {
+                            self.action_open_last_export();
+                        }
+                    }
                 });
             });
 
@@ -1129,6 +1246,38 @@ impl eframe::App for TyperApp {
                     });
             });
 
+        // 見出しアウトラインパネル（クリックで該当見出しへジャンプ）
+        if self.show_outline_panel {
+            egui::Panel::left("outline_panel")
+                .resizable(true)
+                .default_size(200.0)
+                .size_range(140.0..=420.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("🗂 アウトライン").strong().small());
+                    ui.separator();
+                    let headings = extract_headings_outline(&self.markdown_text);
+                    if headings.is_empty() {
+                        ui.label(RichText::new("見出しがありません").small().weak());
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("outline_scroll")
+                            .show(ui, |ui| {
+                                for (level, title, char_idx) in headings {
+                                    let indent = (level.saturating_sub(1)) as f32 * 12.0;
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(indent);
+                                        if ui.small_button(&title).clicked() {
+                                            self.cursor_char_range = Some((char_idx, char_idx));
+                                            self.pending_cursor_selection =
+                                                Some((char_idx, char_idx));
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                });
+        }
+
         // 中央（左ペイン）：マークアップエディタ＆クイック挿入バー＆検索置換バー
         egui::CentralPanel::default().show(ui, |ui| {
             // 書式・要素クイック挿入バー（カーソル位置への挿入・選択テキストのラップに対応）
@@ -1170,6 +1319,35 @@ impl eframe::App for TyperApp {
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "正常", "]{green}");
+                }
+                if ui
+                    .small_button("🟠 橙文字")
+                    .on_hover_text("選択範囲（または新規テキスト）を橙文字にします")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "注意", "]{orange}");
+                }
+                if ui
+                    .small_button("🟣 紫文字")
+                    .on_hover_text("選択範囲（または新規テキスト）を紫文字にします")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "参考", "]{purple}");
+                }
+
+                ui.add(
+                    TextEdit::singleline(&mut self.custom_color_hex)
+                        .desired_width(60.0)
+                        .hint_text("#rrggbb"),
+                );
+                if ui
+                    .small_button("🎨 適用")
+                    .on_hover_text("入力したHEXカラーコードで選択範囲（または新規テキスト）を着色します")
+                    .clicked()
+                    && !self.custom_color_hex.trim().is_empty()
+                {
+                    let hex = self.custom_color_hex.trim().to_string();
+                    self.wrap_selection_or_insert("[", "カスタム色", &format!("]{{color:{hex}}}"));
                 }
 
                 ui.separator();
@@ -1545,6 +1723,64 @@ fn append_line_with_inline_highlights(
     }
 }
 
+/// 最近使ったファイル一覧を永続化するテキストファイルのパス（1行1パス、新しい順）
+fn recent_files_store_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("Typer").join("recent_files.txt"))
+}
+
+/// 保存されている最近使ったファイル一覧を読み込む（既に存在しないファイルは除外する）
+fn load_recent_files() -> Vec<PathBuf> {
+    let Some(path) = recent_files_store_path() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .take(8)
+        .collect()
+}
+
+/// 最近使ったファイル一覧をテキストファイルへ保存する（失敗しても致命的ではないため無視する）
+fn save_recent_files(files: &[PathBuf]) {
+    let Some(path) = recent_files_store_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = files
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::write(&path, content);
+}
+
+/// 現在編集中のファイルに対応する自動保存バックアップファイルのパスを決定する。
+/// 保存済みファイルの場合は同じフォルダに `.autosave.md` 拡張で置き、
+/// 未保存の新規文書の場合はアプリ設定フォルダ内の固定ファイルへ保存する。
+fn autosave_path_for(current_file: &Option<PathBuf>) -> Option<PathBuf> {
+    match current_file {
+        Some(path) => {
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            Some(path.with_file_name(format!("{stem}.autosave.md")))
+        }
+        None => {
+            let appdata = std::env::var("APPDATA").ok()?;
+            Some(
+                PathBuf::from(appdata)
+                    .join("Typer")
+                    .join("untitled_autosave.md"),
+            )
+        }
+    }
+}
+
 /// Windowsの日本語システムフォントを `egui` に登録し、UIおよびエディタでの日本語表示・IME入力を最適化する
 fn setup_japanese_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
@@ -1640,6 +1876,11 @@ mod tests {
             show_typst_source: false,
             status_message: String::new(),
             startup_visibility_ensured: false,
+            recent_files: Vec::new(),
+            last_autosave_time: Instant::now(),
+            show_outline_panel: false,
+            custom_color_hex: String::new(),
+            last_export_path: None,
         }
     }
 
@@ -1726,6 +1967,28 @@ mod tests {
         app.replace_all_matches();
         assert_eq!(app.markdown_text, "あいうえお");
         assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_record_recent_file_dedups_and_moves_to_front() {
+        let mut app = test_app("");
+        app.recent_files = vec![PathBuf::from("a.md"), PathBuf::from("b.md")];
+        app.record_recent_file(Path::new("b.md"));
+        assert_eq!(
+            app.recent_files,
+            vec![PathBuf::from("b.md"), PathBuf::from("a.md")]
+        );
+    }
+
+    #[test]
+    fn test_record_recent_file_caps_at_eight_entries() {
+        let mut app = test_app("");
+        for i in 0..8 {
+            app.record_recent_file(Path::new(&format!("{i}.md")));
+        }
+        app.record_recent_file(Path::new("new.md"));
+        assert_eq!(app.recent_files.len(), 8);
+        assert_eq!(app.recent_files[0], PathBuf::from("new.md"));
     }
 
     #[test]

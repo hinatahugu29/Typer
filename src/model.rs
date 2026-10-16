@@ -44,6 +44,8 @@ pub struct DocumentSettings {
     pub line_height: f32,
     /// 基本フォント種別（ゴシック / 明朝）
     pub font_choice: FontChoice,
+    /// 文書全体のアクセントカラー（見出し罫線・表ヘッダ・リンク等に反映。例: "#1a73e8"）
+    pub accent_color: String,
 }
 
 impl Default for DocumentSettings {
@@ -55,6 +57,7 @@ impl Default for DocumentSettings {
             font_size: "10.5pt".to_string(),
             line_height: 1.5,
             font_choice: FontChoice::Gothic,
+            accent_color: "#1a73e8".to_string(),
         }
     }
 }
@@ -77,6 +80,10 @@ pub struct BlockAttributes {
     pub widths: Option<Vec<String>>,
     /// ブロック単位の文字サイズ（例: "12pt", "9pt"）
     pub font_size: Option<String>,
+    /// ブロック単位の文字色（見出し・段落の個別色上書きに使用。例: "red", "#188038"）
+    pub color: Option<String>,
+    /// 表のヘッダー行の背景色上書き（表ブロックのみ使用。例: "#fdf0e6"）
+    pub header_bg: Option<String>,
 }
 
 impl BlockAttributes {
@@ -85,6 +92,8 @@ impl BlockAttributes {
             && self.line_height.is_none()
             && self.widths.is_none()
             && self.font_size.is_none()
+            && self.color.is_none()
+            && self.header_bg.is_none()
     }
 }
 
