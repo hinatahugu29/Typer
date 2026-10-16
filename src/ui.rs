@@ -796,6 +796,94 @@ impl eframe::App for TyperApp {
         } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
             self.perform_undo();
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::U)) {
+            self.wrap_selection_or_insert("[", "下線テキスト", "]{underline}");
+        }
+
+        // 改行(<br>)挿入：Shift+Enter で段落・表セル内の強制改行を挿入する
+        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Enter)) {
+            self.insert_at_cursor("<br>");
+        }
+        // 改ページ・空白行（Enter系の拡張）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter)) {
+            self.insert_at_cursor("\n:::pagebreak\n");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter)) {
+            self.insert_at_cursor("\n:::space 1em\n");
+        }
+
+        // 文字色（Ctrl+Alt+数字）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num1)) {
+            self.wrap_selection_or_insert("[", "重要事項", "]{red}");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num2)) {
+            self.wrap_selection_or_insert("[", "補足事項", "]{blue}");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num3)) {
+            self.wrap_selection_or_insert("[", "正常", "]{green}");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num4)) {
+            self.wrap_selection_or_insert("[", "注意", "]{orange}");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Num5)) {
+            self.wrap_selection_or_insert("[", "参考", "]{purple}");
+        }
+
+        // 挿入系（Ctrl+Alt+文字）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::T)) {
+            self.insert_at_cursor(
+                "\n{widths: 25%, 50%, 25%}\n| 項目 | 内容 | 備考 |\n| :--- | :--- | :--- |\n| サンプル | 内容を入力 | 備考 |\n",
+            );
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::R)) {
+            self.insert_at_cursor("\n{align: right}\n2026年10月16日\n");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::C)) {
+            self.insert_at_cursor("\n{align: center, size: 15pt}\n**文書タイトル**\n");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::W)) {
+            self.insert_at_cursor("\n{align: center, block-width: 60%}\n");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::L)) {
+            self.insert_at_cursor("\n{line-height: 1.2}\n");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::I)) {
+            self.action_insert_image_dialog();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::B)) {
+            self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
+        }
+
+        // 表示・出力系（Ctrl+Shift+文字 / Ctrl+記号）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::E)) {
+            self.action_export_html();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::Y)) {
+            self.show_typst_source = !self.show_typst_source;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::O)) {
+            self.show_outline_panel = !self.show_outline_panel;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Comma)) {
+            self.show_page_settings_bar = !self.show_page_settings_bar;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Plus))
+            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Equals))
+        {
+            self.zoom = (self.zoom + 0.15).clamp(0.5, 2.5);
+            self.revision += 1;
+            self.trigger_preview_update();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Minus)) {
+            self.zoom = (self.zoom - 0.15).clamp(0.5, 2.5);
+            self.revision += 1;
+            self.trigger_preview_update();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
+            self.zoom = 1.0;
+            self.revision += 1;
+            self.trigger_preview_update();
+        }
 
         // Ctrl + マウスホイールによるプレビュー拡大・縮小
         let zoom_delta = ctx.input(|i| i.zoom_delta());
@@ -932,14 +1020,14 @@ impl eframe::App for TyperApp {
                     }
                     if ui
                         .selectable_label(self.show_page_settings_bar, "⚙ ページ設定")
-                        .on_hover_text("用紙向き・フォント・余白・文字サイズ・行間の設定バーを開閉します")
+                        .on_hover_text("用紙向き・フォント・余白・文字サイズ・行間の設定バーを開閉します (Ctrl+,)")
                         .clicked()
                     {
                         self.show_page_settings_bar = !self.show_page_settings_bar;
                     }
                     if ui
                         .selectable_label(self.show_outline_panel, "🗂 アウトライン")
-                        .on_hover_text("見出し一覧パネルを開閉し、クリックで該当箇所へジャンプします")
+                        .on_hover_text("見出し一覧パネルを開閉し、クリックで該当箇所へジャンプします (Ctrl+Shift+O)")
                         .clicked()
                     {
                         self.show_outline_panel = !self.show_outline_panel;
@@ -965,24 +1053,25 @@ impl eframe::App for TyperApp {
                     .fill(Color32::from_rgb(232, 240, 254));
                     if ui
                         .add(html_btn)
-                        .on_hover_text("ページ境界に依存しない単一HTMLファイルとして出力します")
+                        .on_hover_text("ページ境界に依存しない単一HTMLファイルとして出力します (Ctrl+Shift+E)")
                         .clicked()
                     {
                         self.action_export_html();
                     }
 
                     ui.separator();
-                    ui.checkbox(&mut self.show_typst_source, "Typstコード");
+                    ui.checkbox(&mut self.show_typst_source, "Typstコード")
+                        .on_hover_text("生成されたTypstコードを表示します (Ctrl+Alt+Y)");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("100%").on_hover_text("表示倍率を100%に戻す").clicked() {
+                        if ui.button("100%").on_hover_text("表示倍率を100%に戻す (Ctrl+0)").clicked() {
                             self.zoom = 1.0;
                             self.revision += 1;
                             self.trigger_preview_update();
                         }
                         if ui
                             .button("＋")
-                            .on_hover_text("プレビュー拡大 (Ctrl+ホイール)")
+                            .on_hover_text("プレビュー拡大 (Ctrl+ホイール / Ctrl++)")
                             .clicked()
                         {
                             self.zoom = (self.zoom + 0.15).clamp(0.5, 2.5);
@@ -992,7 +1081,7 @@ impl eframe::App for TyperApp {
                         ui.label(format!("{:.0}%", self.zoom * 100.0));
                         if ui
                             .button("－")
-                            .on_hover_text("プレビュー縮小 (Ctrl+ホイール)")
+                            .on_hover_text("プレビュー縮小 (Ctrl+ホイール / Ctrl+-)")
                             .clicked()
                         {
                             self.zoom = (self.zoom - 0.15).clamp(0.5, 2.5);
@@ -1341,42 +1430,42 @@ impl eframe::App for TyperApp {
                 }
                 if ui
                     .small_button("U 下線")
-                    .on_hover_text("選択範囲（または新規テキスト）に下線を引きます")
+                    .on_hover_text("選択範囲（または新規テキスト）に下線を引きます (Ctrl+U)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "下線テキスト", "]{underline}");
                 }
                 if ui
                     .small_button("🔴 赤文字")
-                    .on_hover_text("選択範囲（または新規テキスト）を赤文字にします")
+                    .on_hover_text("選択範囲（または新規テキスト）を赤文字にします (Ctrl+Alt+1)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "重要事項", "]{red}");
                 }
                 if ui
                     .small_button("🔵 青文字")
-                    .on_hover_text("選択範囲（または新規テキスト）を青文字にします")
+                    .on_hover_text("選択範囲（または新規テキスト）を青文字にします (Ctrl+Alt+2)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "補足事項", "]{blue}");
                 }
                 if ui
                     .small_button("🟢 緑文字")
-                    .on_hover_text("選択範囲（または新規テキスト）を緑文字にします")
+                    .on_hover_text("選択範囲（または新規テキスト）を緑文字にします (Ctrl+Alt+3)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "正常", "]{green}");
                 }
                 if ui
                     .small_button("🟠 橙文字")
-                    .on_hover_text("選択範囲（または新規テキスト）を橙文字にします")
+                    .on_hover_text("選択範囲（または新規テキスト）を橙文字にします (Ctrl+Alt+4)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "注意", "]{orange}");
                 }
                 if ui
                     .small_button("🟣 紫文字")
-                    .on_hover_text("選択範囲（または新規テキスト）を紫文字にします")
+                    .on_hover_text("選択範囲（または新規テキスト）を紫文字にします (Ctrl+Alt+5)")
                     .clicked()
                 {
                     self.wrap_selection_or_insert("[", "参考", "]{purple}");
@@ -1405,7 +1494,7 @@ impl eframe::App for TyperApp {
 
                 if ui
                     .small_button("📊 列幅付き表")
-                    .on_hover_text("カーソル位置に列幅指定付きの表を挿入します")
+                    .on_hover_text("カーソル位置に列幅指定付きの表を挿入します (Ctrl+Alt+T)")
                     .clicked()
                 {
                     self.insert_at_cursor(
@@ -1414,56 +1503,56 @@ impl eframe::App for TyperApp {
                 }
                 if ui
                     .small_button("➡ 右寄せ段落")
-                    .on_hover_text("カーソル位置に日付・署名向けの右寄せ属性を挿入します")
+                    .on_hover_text("カーソル位置に日付・署名向けの右寄せ属性を挿入します (Ctrl+Alt+R)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n{align: right}\n2026年10月16日\n");
                 }
                 if ui
                     .small_button("↔ 中央タイトル")
-                    .on_hover_text("カーソル位置に中央寄せ＋文字サイズ指定を挿入します")
+                    .on_hover_text("カーソル位置に中央寄せ＋文字サイズ指定を挿入します (Ctrl+Alt+C)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n{align: center, size: 15pt}\n**文書タイトル**\n");
                 }
                 if ui
                     .small_button("⬌ 幅指定")
-                    .on_hover_text("カーソル位置に段落の表示幅（中央寄せ）指定を挿入します")
+                    .on_hover_text("カーソル位置に段落の表示幅（中央寄せ）指定を挿入します (Ctrl+Alt+W)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n{align: center, block-width: 60%}\n");
                 }
                 if ui
                     .small_button("↕ 行間指定")
-                    .on_hover_text("カーソル位置に段落の行間指定を挿入します")
+                    .on_hover_text("カーソル位置に段落の行間指定を挿入します (Ctrl+Alt+L)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n{line-height: 1.2}\n");
                 }
                 if ui
                     .small_button("🖼 画像...")
-                    .on_hover_text("ローカル画像ファイルを選択してカーソル位置に挿入します（ドラッグ＆ドロップも可）。挿入後、![alt](path){width: 50%} のようにサイズ指定を追記できます")
+                    .on_hover_text("ローカル画像ファイルを選択してカーソル位置に挿入します（ドラッグ＆ドロップも可）。挿入後、![alt](path){width: 50%} のようにサイズ指定を追記できます (Ctrl+Alt+I)")
                     .clicked()
                 {
                     self.action_insert_image_dialog();
                 }
                 if ui
                     .small_button("📄 改ページ")
-                    .on_hover_text("カーソル位置に手動改ページを挿入します")
+                    .on_hover_text("カーソル位置に手動改ページを挿入します (Ctrl+Enter)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n:::pagebreak\n");
                 }
                 if ui
                     .small_button("↕ 空白行")
-                    .on_hover_text("カーソル位置に明示的な垂直方向の空白を挿入します")
+                    .on_hover_text("カーソル位置に明示的な垂直方向の空白を挿入します (Ctrl+Shift+Enter)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n:::space 1em\n");
                 }
                 if ui
                     .small_button("🔲 囲み枠")
-                    .on_hover_text("カーソル位置に全周を罫線で囲んだボックスを挿入します")
+                    .on_hover_text("カーソル位置に全周を罫線で囲んだボックスを挿入します (Ctrl+Alt+B)")
                     .clicked()
                 {
                     self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
@@ -2011,6 +2100,17 @@ mod tests {
         app.wrap_selection_or_insert("**", "太字", "**");
         assert_eq!(app.markdown_text, "あ**太字**");
         assert_eq!(app.cursor_char_range, Some((3, 5)));
+    }
+
+    #[test]
+    fn test_insert_at_cursor_inserts_br_tag_for_table_cell_line_break() {
+        // Shift+Enter ショートカットが行う挿入と同じ操作を検証する：
+        // 表のセルは1物理行でしか書けないため、改行には `<br>` を使う
+        let mut app = test_app("| 1行目2行目 |");
+        let br_pos = "| 1行目".chars().count();
+        app.cursor_char_range = Some((br_pos, br_pos));
+        app.insert_at_cursor("<br>");
+        assert_eq!(app.markdown_text, "| 1行目<br>2行目 |");
     }
 
     #[test]
