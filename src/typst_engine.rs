@@ -225,6 +225,16 @@ fn load_windows_japanese_fonts() -> Vec<Font> {
         }
     }
 
+    // Typst公式が組版・数式表示用に同梱しているフォント（New Computer Modern Math等）を追加する。
+    // これがないと `$alpha + beta$` のような数式記法・ギリシャ文字・特殊記号が
+    // 対応フォント無しでグリフ欠落（四角表示）になる
+    for static_bytes in typst_assets::fonts() {
+        let shared_bytes = Bytes::new(static_bytes);
+        for font in Font::iter(shared_bytes) {
+            fonts.push(font);
+        }
+    }
+
     fonts
 }
 
@@ -279,6 +289,21 @@ mod tests {
         let html = generate_html(&doc);
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<colgroup>"));
+    }
+
+    #[test]
+    fn test_math_notation_renders_without_error() {
+        // typst-assetsのNewCMMathフォント追加後、数式記法（ギリシャ文字・分数・総和等）を
+        // 含む文書がエラーなく組版できることを確認する（実際のグリフ表示は目視確認済み）
+        let src = "```typst\n$alpha + beta = gamma$\n$ sum_(n=1)^infinity 1 / n^2 = pi^2 / 6 $\n```\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        let mut engine = TypstEngine::new();
+
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("Preview rendering with math notation should not fail");
+        assert!(!preview.pages.is_empty());
     }
 
     #[test]

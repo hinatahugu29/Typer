@@ -4749,6 +4749,7 @@ dependencies = [
  "pulldown-cmark",
  "rfd",
  "typst",
+ "typst-assets",
  "typst-layout",
  "typst-pdf",
  "typst-render",

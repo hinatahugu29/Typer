@@ -3,6 +3,7 @@ name = "typer"
 version = "0.1.0"
 edition = "2024"
 description = "軽量マークアップ文書作成アプリ (MVP)"
+repository = "https://github.com/hinatahugu29/Typer"
 
 [dependencies]
 eframe = "0.37.0"
@@ -13,6 +14,7 @@ typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 typst-render = "0.15.1"
 typst-syntax = "0.15.1"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
 rfd = "0.17.2"
 
 [profile.release]
