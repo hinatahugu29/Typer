@@ -1727,4 +1727,43 @@ mod tests {
         assert_eq!(app.markdown_text, "あいうえお");
         assert!(app.undo_stack.is_empty());
     }
+
+    #[test]
+    #[ignore]
+    fn bench_editor_frame_cost_at_scale() {
+        use crate::sample::SAMPLE_DOCUMENT;
+        use std::time::Instant;
+
+        for repeat in [1usize, 10, 50, 200] {
+            let text = SAMPLE_DOCUMENT.repeat(repeat);
+            let char_len = text.chars().count();
+
+            // 1フレームあたり実際に走る「シンタックスハイライトの再計算」コスト
+            let start = Instant::now();
+            for _ in 0..30 {
+                let _ = highlight_custom_markdown(&text);
+            }
+            let highlight_30frames = start.elapsed();
+
+            // 1フレームあたり実際に走る「undo判定用の全文クローン」コスト
+            let start = Instant::now();
+            for _ in 0..30 {
+                let _ = text.clone();
+            }
+            let clone_30frames = start.elapsed();
+
+            let mut app = test_app(&text);
+            app.find_query = "情報システム部".to_string();
+            let start = Instant::now();
+            let matches = app.find_matches();
+            let find_elapsed = start.elapsed();
+
+            println!(
+                "repeat={repeat:>4} chars={char_len:>9} | highlight(30f)={highlight_30frames:>10?} ({:>8?}/frame) | clone(30f)={clone_30frames:>10?} ({:>8?}/frame) | find_matches={find_elapsed:>10?} (hits={})",
+                highlight_30frames / 30,
+                clone_30frames / 30,
+                matches.len()
+            );
+        }
+    }
 }

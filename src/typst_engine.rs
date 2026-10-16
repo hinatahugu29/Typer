@@ -247,4 +247,32 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<colgroup>"));
     }
+
+    #[test]
+    #[ignore]
+    fn bench_compile_render_pdf_at_scale() {
+        for repeat in [1usize, 10, 50, 200] {
+            let text = SAMPLE_DOCUMENT.repeat(repeat);
+            let doc = parse_document(&text);
+            let typst_code = generate_typst_source(&doc);
+            let mut engine = TypstEngine::new();
+
+            let start = Instant::now();
+            let preview = engine
+                .render_preview(&typst_code, 2.0)
+                .expect("preview rendering should succeed");
+            let preview_elapsed = start.elapsed();
+
+            let start = Instant::now();
+            let pdf_bytes = engine.export_pdf(&typst_code).expect("pdf export should succeed");
+            let pdf_elapsed = start.elapsed();
+
+            println!(
+                "repeat={repeat:>4} chars={:>9} | pages={:>3} preview={preview_elapsed:>10?} | pdf={pdf_elapsed:>10?} ({} bytes)",
+                text.chars().count(),
+                preview.pages.len(),
+                pdf_bytes.len()
+            );
+        }
+    }
 }
