@@ -6,14 +6,13 @@
 //! - 安全性・操作性：未保存変更時の終了・読み込み確認モーダル、ドラッグ＆ドロップ読み込み（文書・画像）
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Key, Modifiers, RichText,
-    Sense, Stroke, TextEdit, TextFormat, TextureHandle, TextureOptions, Vec2, ViewportCommand,
-    text::{CCursor, CCursorRange, LayoutJob},
+    self, Color32, ColorImage, Key, Modifiers, RichText, Sense, Stroke, TextEdit, TextureHandle,
+    TextureOptions, Vec2, ViewportCommand,
+    text::{CCursor, CCursorRange},
 };
 
 use crate::html_export::generate_html_with_base;
@@ -21,10 +20,21 @@ use crate::model::{FontChoice, Orientation};
 use crate::parser::{
     extract_headings_outline, parse_document, update_document_settings_in_markdown,
 };
+#[cfg(test)]
 use crate::sample::SAMPLE_DOCUMENT;
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
 use crate::typst_gen::generate_typst_source_with_base;
+#[cfg(test)]
+use crate::ui_persistence::recent_files_store_path;
+use crate::ui_persistence::{
+    autosave_path_for, load_dark_mode_setting, load_recent_files, resolve_startup_document,
+    save_dark_mode_setting, save_recent_files, setup_japanese_fonts, setup_visual_theme,
+};
+use crate::ui_text::{
+    byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
+    is_valid_hex_color,
+};
 
 enum WorkerRequest {
     RenderPreview {
@@ -1767,343 +1777,6 @@ impl eframe::App for TyperApp {
                 });
         });
     }
-}
-
-/// `#rgb` または `#rrggbb` 形式のHEXカラーコードとして妥当かを検証する
-fn is_valid_hex_color(s: &str) -> bool {
-    s.starts_with('#')
-        && (s.len() == 4 || s.len() == 7)
-        && s[1..].chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// 文字インデックス (`chars()` の順番) をUTF-8バイトオフセットに変換する
-fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(byte_i, _)| byte_i)
-        .unwrap_or(s.len())
-}
-
-/// UTF-8バイトオフセットを文字インデックスに変換する
-fn byte_to_char_idx(s: &str, byte_idx: usize) -> usize {
-    let clamped = byte_idx.min(s.len());
-    s[..clamped].chars().count()
-}
-
-/// 文字インデックスから 1始まりの `(行番号, 列番号)` を計算する
-fn char_idx_to_line_col(s: &str, char_idx: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (i, ch) in s.chars().enumerate() {
-        if i >= char_idx {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
-/// 標準Markdownおよび独自拡張構文（`{widths: ...}`, `[...]{red}`, `:::pagebreak` 等）の
-/// シンタックスハイライトを行う
-fn highlight_custom_markdown(text: &str) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    let font_id = egui::FontId::new(14.5, FontFamily::Monospace);
-
-    let default_fmt = TextFormat {
-        font_id: font_id.clone(),
-        color: Color32::from_rgb(32, 33, 36),
-        ..Default::default()
-    };
-    let heading_fmt = TextFormat {
-        font_id: egui::FontId::new(15.0, FontFamily::Monospace),
-        color: Color32::from_rgb(23, 78, 166),
-        ..Default::default()
-    };
-    let attr_fmt = TextFormat {
-        font_id: font_id.clone(),
-        color: Color32::from_rgb(147, 52, 230),
-        background: Color32::from_rgb(248, 242, 254),
-        ..Default::default()
-    };
-    let pagebreak_fmt = TextFormat {
-        font_id: font_id.clone(),
-        color: Color32::from_rgb(227, 116, 0),
-        background: Color32::from_rgb(254, 247, 224),
-        ..Default::default()
-    };
-    let frontmatter_fmt = TextFormat {
-        font_id: font_id.clone(),
-        color: Color32::from_rgb(13, 101, 45),
-        ..Default::default()
-    };
-    let table_pipe_fmt = TextFormat {
-        font_id: font_id.clone(),
-        color: Color32::from_rgb(26, 115, 232),
-        ..Default::default()
-    };
-
-    let mut in_frontmatter = false;
-    for (idx, line) in text.split_inclusive('\n').enumerate() {
-        let trimmed = line.trim();
-        if idx == 0 && trimmed == "---" {
-            in_frontmatter = true;
-            job.append(line, 0.0, frontmatter_fmt.clone());
-            continue;
-        }
-        if in_frontmatter {
-            job.append(line, 0.0, frontmatter_fmt.clone());
-            if trimmed == "---" {
-                in_frontmatter = false;
-            }
-            continue;
-        }
-
-        if trimmed.starts_with('#') {
-            job.append(line, 0.0, heading_fmt.clone());
-        } else if trimmed.eq_ignore_ascii_case(":::pagebreak")
-            || trimmed.eq_ignore_ascii_case("{pagebreak}")
-        {
-            job.append(line, 0.0, pagebreak_fmt.clone());
-        } else if trimmed.starts_with('{') && trimmed.ends_with('}') && !trimmed.contains('|') {
-            job.append(line, 0.0, attr_fmt.clone());
-        } else if trimmed.starts_with('|') {
-            append_line_with_inline_highlights(
-                &mut job,
-                line,
-                &default_fmt,
-                &attr_fmt,
-                Some(&table_pipe_fmt),
-            );
-        } else {
-            append_line_with_inline_highlights(&mut job, line, &default_fmt, &attr_fmt, None);
-        }
-    }
-
-    if text.is_empty() {
-        job.append("", 0.0, default_fmt);
-    }
-
-    job
-}
-
-fn append_line_with_inline_highlights(
-    job: &mut LayoutJob,
-    line: &str,
-    default_fmt: &TextFormat,
-    attr_fmt: &TextFormat,
-    pipe_fmt: Option<&TextFormat>,
-) {
-    let mut rest = line;
-    while !rest.is_empty() {
-        if let Some(pf) = pipe_fmt {
-            if rest.starts_with('|') {
-                job.append("|", 0.0, pf.clone());
-                rest = &rest[1..];
-                continue;
-            }
-        }
-        if rest.starts_with('[') {
-            if let Some(close_bracket) = rest.find("]{") {
-                let after = close_bracket + 2;
-                if let Some(close_brace) = rest[after..].find('}') {
-                    let total = after + close_brace + 1;
-                    job.append(&rest[..total], 0.0, attr_fmt.clone());
-                    rest = &rest[total..];
-                    continue;
-                }
-            }
-        }
-        if rest.starts_with('{') {
-            if let Some(close_brace) = rest.find('}') {
-                let inner = &rest[1..close_brace];
-                if inner.contains(':') {
-                    let total = close_brace + 1;
-                    job.append(&rest[..total], 0.0, attr_fmt.clone());
-                    rest = &rest[total..];
-                    continue;
-                }
-            }
-        }
-
-        let first_char_len = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        let next_pos = if pipe_fmt.is_some() {
-            rest[first_char_len..]
-                .find(['|', '[', '{'])
-                .map(|p| p + first_char_len)
-                .unwrap_or(rest.len())
-        } else {
-            rest[first_char_len..]
-                .find(['[', '{'])
-                .map(|p| p + first_char_len)
-                .unwrap_or(rest.len())
-        };
-
-        job.append(&rest[..next_pos], 0.0, default_fmt.clone());
-        rest = &rest[next_pos..];
-    }
-}
-
-/// 最近使ったファイル一覧を永続化するテキストファイルのパス（1行1パス、新しい順）
-fn recent_files_store_path() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    Some(
-        PathBuf::from(appdata)
-            .join("Typer")
-            .join("recent_files.txt"),
-    )
-}
-
-/// 保存されている最近使ったファイル一覧を読み込む（既に存在しないファイルは除外する）
-/// 起動時に表示する初期文書を決定する：直近に開いていたファイル（先頭）が読み込めればそれを、
-/// 読み込めない・1件もない場合はサンプル報告書を返す
-fn resolve_startup_document(recent_files: &[PathBuf]) -> (String, Option<PathBuf>, String) {
-    recent_files
-        .first()
-        .and_then(|path| {
-            std::fs::read_to_string(path).ok().map(|content| {
-                (
-                    content,
-                    Some(path.clone()),
-                    format!("前回のファイルを自動的に開きました: {}", path.display()),
-                )
-            })
-        })
-        .unwrap_or_else(|| {
-            (
-                SAMPLE_DOCUMENT.to_string(),
-                None,
-                "準備完了 — サンプル報告書を読み込みました".to_string(),
-            )
-        })
-}
-
-fn load_recent_files() -> Vec<PathBuf> {
-    let Some(path) = recent_files_store_path() else {
-        return Vec::new();
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    content
-        .lines()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .take(8)
-        .collect()
-}
-
-/// 最近使ったファイル一覧をテキストファイルへ保存する（失敗しても致命的ではないため無視する）
-fn save_recent_files(files: &[PathBuf]) {
-    let Some(path) = recent_files_store_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let content = files
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let _ = std::fs::write(&path, content);
-}
-
-/// 現在編集中のファイルに対応する自動保存バックアップファイルのパスを決定する。
-/// 保存済みファイルの場合は同じフォルダに `.autosave.md` 拡張で置き、
-/// 未保存の新規文書の場合はアプリ設定フォルダ内の固定ファイルへ保存する。
-fn autosave_path_for(current_file: &Option<PathBuf>) -> Option<PathBuf> {
-    match current_file {
-        Some(path) => {
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            Some(path.with_file_name(format!("{stem}.autosave.md")))
-        }
-        None => {
-            let appdata = std::env::var("APPDATA").ok()?;
-            Some(
-                PathBuf::from(appdata)
-                    .join("Typer")
-                    .join("untitled_autosave.md"),
-            )
-        }
-    }
-}
-
-/// Windowsの日本語システムフォントを `egui` に登録し、UIおよびエディタでの日本語表示・IME入力を最適化する
-fn setup_japanese_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-
-    let candidates = [
-        r"C:\Windows\Fonts\BIZ-UDGothicR.ttc",
-        r"C:\Windows\Fonts\YuGothM.ttc",
-        r"C:\Windows\Fonts\meiryo.ttc",
-        r"C:\Windows\Fonts\msgothic.ttc",
-    ];
-
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "jp_system_font".to_owned(),
-                Arc::new(FontData::from_owned(bytes)),
-            );
-            if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
-                prop.insert(0, "jp_system_font".to_owned());
-            }
-            if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
-                mono.push("jp_system_font".to_owned());
-            }
-            break;
-        }
-    }
-
-    ctx.set_fonts(fonts);
-}
-
-fn setup_visual_theme(ctx: &egui::Context, dark_mode: bool) {
-    let mut visuals = if dark_mode {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    if dark_mode {
-        visuals.panel_fill = Color32::from_rgb(30, 31, 34);
-        visuals.extreme_bg_color = Color32::from_rgb(18, 19, 21);
-    } else {
-        visuals.panel_fill = Color32::from_rgb(248, 249, 250);
-        visuals.extreme_bg_color = Color32::WHITE;
-    }
-    ctx.set_visuals(visuals);
-}
-
-/// ダークモード設定の永続化ファイルのパス（最近使ったファイル一覧と同じ設定フォルダ）
-fn dark_mode_store_path() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    Some(PathBuf::from(appdata).join("Typer").join("dark_mode.txt"))
-}
-
-/// 保存されているダークモード設定を読み込む（未設定時は既定でライトモード）
-fn load_dark_mode_setting() -> bool {
-    let Some(path) = dark_mode_store_path() else {
-        return false;
-    };
-    std::fs::read_to_string(&path)
-        .map(|s| s.trim() == "1")
-        .unwrap_or(false)
-}
-
-/// ダークモード設定をテキストファイルへ保存する（失敗しても致命的ではないため無視する）
-fn save_dark_mode_setting(enabled: bool) {
-    let Some(path) = dark_mode_store_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&path, if enabled { "1" } else { "0" });
 }
 
 #[cfg(test)]

@@ -8,6 +8,8 @@ mod templates;
 mod typst_engine;
 mod typst_gen;
 mod ui;
+mod ui_persistence;
+mod ui_text;
 
 use eframe::egui;
 use ui::TyperApp;
