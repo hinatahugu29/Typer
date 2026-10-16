@@ -284,7 +284,11 @@ pub fn parse_document(input: &str) -> Document {
                             InlineContainer::Link(url) => Inline::Link { text: inner, url },
                             InlineContainer::Image(url) => {
                                 let alt = inlines_to_plain_text(&inner);
-                                Inline::Image { alt, url, width: None }
+                                Inline::Image {
+                                    alt,
+                                    url,
+                                    width: None,
+                                }
                             }
                         };
                         parent_inlines.push(wrapped);
@@ -1126,13 +1130,16 @@ line-height: 1.4
         let doc = parse_document("[下線テキスト]{underline}、~~取り消し線~~\n");
         match &doc.blocks[0] {
             Block::Paragraph { content, .. } => {
-                let has_underline = content.iter().any(|i| {
-                    matches!(i, Inline::Styled { style, .. } if style.underline)
-                });
+                let has_underline = content
+                    .iter()
+                    .any(|i| matches!(i, Inline::Styled { style, .. } if style.underline));
                 let has_strike = content
                     .iter()
                     .any(|i| matches!(i, Inline::Strikethrough(_)));
-                assert!(has_underline, "underline span should be parsed: {content:?}");
+                assert!(
+                    has_underline,
+                    "underline span should be parsed: {content:?}"
+                );
                 assert!(has_strike, "strikethrough should be parsed: {content:?}");
             }
             other => panic!("expected paragraph, got {other:?}"),
@@ -1196,7 +1203,8 @@ line-height: 1.4
 
     #[test]
     fn test_extract_headings_outline_basic() {
-        let text = "# 見出し1\n本文\n## 見出し2\n```\n# コード内は見出しではない\n```\n### 見出し3\n";
+        let text =
+            "# 見出し1\n本文\n## 見出し2\n```\n# コード内は見出しではない\n```\n### 見出し3\n";
         let headings = extract_headings_outline(text);
         assert_eq!(
             headings,

@@ -147,7 +147,10 @@ mod tests {
         assert_eq!(TEMPLATES.len(), 4);
         for (name, body) in TEMPLATES {
             assert!(!name.is_empty());
-            assert!(!body.trim().is_empty(), "template {name} should not be empty");
+            assert!(
+                !body.trim().is_empty(),
+                "template {name} should not be empty"
+            );
         }
     }
 

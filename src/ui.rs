@@ -18,7 +18,9 @@ use eframe::egui::{
 
 use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
-use crate::parser::{extract_headings_outline, parse_document, update_document_settings_in_markdown};
+use crate::parser::{
+    extract_headings_outline, parse_document, update_document_settings_in_markdown,
+};
 use crate::sample::SAMPLE_DOCUMENT;
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
@@ -125,8 +127,10 @@ impl TyperApp {
             window.set_visible(true);
             window.focus_window();
         }
-        cc.egui_ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        cc.egui_ctx.send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
+        cc.egui_ctx
+            .send_viewport_cmd(ViewportCommand::Visible(true));
+        cc.egui_ctx
+            .send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
 
         setup_japanese_fonts(&cc.egui_ctx);
         setup_visual_theme(&cc.egui_ctx);
@@ -547,9 +551,7 @@ impl TyperApp {
         self.push_undo_snapshot();
 
         let total_chars = self.markdown_text.chars().count();
-        let (start_char, end_char) = self
-            .cursor_char_range
-            .unwrap_or((total_chars, total_chars));
+        let (start_char, end_char) = self.cursor_char_range.unwrap_or((total_chars, total_chars));
         let start_byte = char_to_byte_idx(&self.markdown_text, start_char);
         let end_byte = char_to_byte_idx(&self.markdown_text, end_char);
 
@@ -572,9 +574,7 @@ impl TyperApp {
         self.push_undo_snapshot();
 
         let total_chars = self.markdown_text.chars().count();
-        let (start_char, end_char) = self
-            .cursor_char_range
-            .unwrap_or((total_chars, total_chars));
+        let (start_char, end_char) = self.cursor_char_range.unwrap_or((total_chars, total_chars));
         let start_byte = char_to_byte_idx(&self.markdown_text, start_char);
         let end_byte = char_to_byte_idx(&self.markdown_text, end_char);
 
@@ -730,7 +730,10 @@ impl TyperApp {
             if matches!(ext.as_str(), "md" | "txt" | "markdown") {
                 self.request_action(PendingAction::LoadFilePath(path), ctx);
                 break;
-            } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+            } else if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp"
+            ) {
                 self.insert_image_path(&path);
             }
         }
@@ -1119,7 +1122,8 @@ impl eframe::App for TyperApp {
 
                         // フォント選択
                         let is_gothic = doc_settings.font_choice == FontChoice::Gothic;
-                        if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic {
+                        if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic
+                        {
                             doc_settings.font_choice = FontChoice::Gothic;
                             changed = true;
                         }
@@ -1132,7 +1136,11 @@ impl eframe::App for TyperApp {
 
                         // 余白選択
                         ui.label(RichText::new("余白:").small());
-                        for (label, val) in [("狭 15mm", "15mm"), ("標準 20mm", "20mm"), ("広 25mm", "25mm")] {
+                        for (label, val) in [
+                            ("狭 15mm", "15mm"),
+                            ("標準 20mm", "20mm"),
+                            ("広 25mm", "25mm"),
+                        ] {
                             if ui
                                 .selectable_label(doc_settings.margin == val, label)
                                 .clicked()
@@ -1296,10 +1304,14 @@ impl eframe::App for TyperApp {
                         .default_size(180.0)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("生成されたTypst組版コード (自動変換)").strong());
+                                ui.label(
+                                    RichText::new("生成されたTypst組版コード (自動変換)").strong(),
+                                );
                                 if ui
                                     .small_button("📋 コピー")
-                                    .on_hover_text("生成されたTypstコードをクリップボードにコピーします")
+                                    .on_hover_text(
+                                        "生成されたTypstコードをクリップボードにコピーします",
+                                    )
                                     .clicked()
                                 {
                                     ui.ctx().copy_text(self.last_typst_code.clone());
@@ -1902,7 +1914,11 @@ fn append_line_with_inline_highlights(
 /// 最近使ったファイル一覧を永続化するテキストファイルのパス（1行1パス、新しい順）
 fn recent_files_store_path() -> Option<PathBuf> {
     let appdata = std::env::var("APPDATA").ok()?;
-    Some(PathBuf::from(appdata).join("Typer").join("recent_files.txt"))
+    Some(
+        PathBuf::from(appdata)
+            .join("Typer")
+            .join("recent_files.txt"),
+    )
 }
 
 /// 保存されている最近使ったファイル一覧を読み込む（既に存在しないファイルは除外する）

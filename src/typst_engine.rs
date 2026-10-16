@@ -8,17 +8,17 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use typst::WorldExt;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, Source};
-use typst::WorldExt;
-use typst_syntax::DiagSpan;
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Scalar};
 use typst::{Library, LibraryExt, World};
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 use typst_render::RenderOptions;
+use typst_syntax::DiagSpan;
 
 use crate::typst_gen::decode_local_image_vpath;
 
@@ -174,8 +174,7 @@ impl World for TypstEngine {
 
         let vpath_str = id.vpath().get_without_slash();
         if let Some(real_path) = decode_local_image_vpath(vpath_str) {
-            let bytes = std::fs::read(&real_path)
-                .map_err(|e| FileError::from_io(e, &real_path))?;
+            let bytes = std::fs::read(&real_path).map_err(|e| FileError::from_io(e, &real_path))?;
             return Ok(Bytes::new(bytes));
         }
 
@@ -295,7 +294,8 @@ mod tests {
     fn test_math_notation_renders_without_error() {
         // typst-assetsのNewCMMathフォント追加後、数式記法（ギリシャ文字・分数・総和等）を
         // 含む文書がエラーなく組版できることを確認する（実際のグリフ表示は目視確認済み）
-        let src = "```typst\n$alpha + beta = gamma$\n$ sum_(n=1)^infinity 1 / n^2 = pi^2 / 6 $\n```\n";
+        let src =
+            "```typst\n$alpha + beta = gamma$\n$ sum_(n=1)^infinity 1 / n^2 = pi^2 / 6 $\n```\n";
         let doc = parse_document(src);
         let typst_code = generate_typst_source(&doc);
         let mut engine = TypstEngine::new();
@@ -385,7 +385,9 @@ mod tests {
             let preview_elapsed = start.elapsed();
 
             let start = Instant::now();
-            let pdf_bytes = engine.export_pdf(&typst_code).expect("pdf export should succeed");
+            let pdf_bytes = engine
+                .export_pdf(&typst_code)
+                .expect("pdf export should succeed");
             let pdf_elapsed = start.elapsed();
 
             println!(

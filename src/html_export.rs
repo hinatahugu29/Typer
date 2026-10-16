@@ -278,7 +278,11 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         }
         Block::BlockQuote { blocks, attrs } => {
             let style = block_style_attr(attrs);
-            let class_attr = if attrs.boxed { " class=\"boxed-quote\"" } else { "" };
+            let class_attr = if attrs.boxed {
+                " class=\"boxed-quote\""
+            } else {
+                ""
+            };
             let _ = writeln!(out, "<blockquote{class_attr}{style}>");
             for b in blocks {
                 render_html_block(out, b, base_dir);
@@ -302,11 +306,7 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             );
         }
         Block::Spacer { height } => {
-            let _ = writeln!(
-                out,
-                "<div style=\"height: {}\"></div>",
-                html_escape(height)
-            );
+            let _ = writeln!(out, "<div style=\"height: {}\"></div>", html_escape(height));
         }
         Block::HorizontalRule => {
             out.push_str("<hr>\n");
@@ -341,7 +341,9 @@ fn block_style_attr(attrs: &BlockAttributes) -> String {
         // ブロック自体の水平位置をTypst側の `#align` と揃える
         // （text-align は内側のテキスト寄せのみを担当するため）
         match attrs.align {
-            Some(Alignment::Center) => rules.push("margin-left: auto; margin-right: auto".to_string()),
+            Some(Alignment::Center) => {
+                rules.push("margin-left: auto; margin-right: auto".to_string())
+            }
             Some(Alignment::Right) => rules.push("margin-left: auto".to_string()),
             _ => {}
         }
@@ -518,10 +520,7 @@ mod tests {
 
     #[test]
     fn test_html_escape_escapes_all_special_chars() {
-        assert_eq!(
-            html_escape(r#"<a>&"'"#),
-            "&lt;a&gt;&amp;&quot;&#39;"
-        );
+        assert_eq!(html_escape(r#"<a>&"'"#), "&lt;a&gt;&amp;&quot;&#39;");
         assert_eq!(html_escape("普通の日本語"), "普通の日本語");
     }
 
@@ -544,9 +543,8 @@ mod tests {
 
     #[test]
     fn test_generate_html_table_with_widths_emits_colgroup() {
-        let doc = parse_document(
-            "{widths: 30%, 70%}\n| 項目 | 内容 |\n| :--- | :--- |\n| A | B |\n",
-        );
+        let doc =
+            parse_document("{widths: 30%, 70%}\n| 項目 | 内容 |\n| :--- | :--- |\n| A | B |\n");
         let html = generate_html(&doc);
         assert!(html.contains("<colgroup>"));
         assert!(html.contains("width: 30%;"));

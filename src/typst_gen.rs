@@ -3,9 +3,7 @@
 //! 日本語の社内報告書・業務文書に適した組版ルール（フォント、余白、見出し直後の改ページ抑制、
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
-use crate::model::{
-    Alignment, Block, BlockAttributes, Document, FontChoice, Inline, Orientation,
-};
+use crate::model::{Alignment, Block, BlockAttributes, Document, FontChoice, Inline, Orientation};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -408,7 +406,10 @@ fn render_image_inline(
         let vpath = encode_local_image_vpath(&resolved);
         let safe_width = sanitize_length(width.unwrap_or("80%"), "80%");
         if alt.trim().is_empty() {
-            let _ = write!(out, "#image(\"/{vpath}\", width: {safe_width}, fit: \"contain\")");
+            let _ = write!(
+                out,
+                "#image(\"/{vpath}\", width: {safe_width}, fit: \"contain\")"
+            );
         } else {
             let mut escaped_alt = String::new();
             escape_typst_text(&mut escaped_alt, alt.trim());
@@ -456,7 +457,10 @@ pub fn resolve_local_image_path(url: &str, base_dir: Option<&Path>) -> Option<Pa
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+        if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp"
+        ) {
             return Some(resolved);
         }
     }
@@ -616,8 +620,14 @@ mod tests {
 
     #[test]
     fn test_resolve_local_image_path_rejects_remote_urls() {
-        assert_eq!(resolve_local_image_path("https://example.com/a.png", None), None);
-        assert_eq!(resolve_local_image_path("http://example.com/a.png", None), None);
+        assert_eq!(
+            resolve_local_image_path("https://example.com/a.png", None),
+            None
+        );
+        assert_eq!(
+            resolve_local_image_path("http://example.com/a.png", None),
+            None
+        );
         assert_eq!(resolve_local_image_path("", None), None);
     }
 

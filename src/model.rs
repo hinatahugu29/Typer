@@ -137,9 +137,14 @@ pub enum Block {
     },
     /// ` ```typst ` フェンスコードブロックによる上級者向けの生Typstコード直接挿入。
     /// 内容はエスケープせずそのままTypstソースへ埋め込まれる（HTML出力では評価不能のため注記表示のみ）。
-    RawTypst { code: String, attrs: BlockAttributes },
+    RawTypst {
+        code: String,
+        attrs: BlockAttributes,
+    },
     /// `:::space 1em` 等で指定する明示的な垂直方向の空白ブロック
-    Spacer { height: String },
+    Spacer {
+        height: String,
+    },
     HorizontalRule,
     PageBreak,
 }
