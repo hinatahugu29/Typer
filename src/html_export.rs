@@ -336,6 +336,16 @@ fn block_style_attr(attrs: &BlockAttributes) -> String {
     if let Some(color) = &attrs.color {
         rules.push(format!("color: {}", sanitize_color_hex(color)));
     }
+    if let Some(block_width) = &attrs.block_width {
+        rules.push(format!("width: {}", html_escape(block_width)));
+        // ブロック自体の水平位置をTypst側の `#align` と揃える
+        // （text-align は内側のテキスト寄せのみを担当するため）
+        match attrs.align {
+            Some(Alignment::Center) => rules.push("margin-left: auto; margin-right: auto".to_string()),
+            Some(Alignment::Right) => rules.push("margin-left: auto".to_string()),
+            _ => {}
+        }
+    }
     if rules.is_empty() {
         String::new()
     } else {
@@ -572,6 +582,22 @@ mod tests {
         let doc = parse_document("{color: red}\n段落\n");
         let html = generate_html(&doc);
         assert!(html.contains("color: #c5221f"));
+    }
+
+    #[test]
+    fn test_block_width_attribute_emits_css_width_and_centers() {
+        let doc = parse_document("{align: center, block-width: 60%}\n段落\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("width: 60%"));
+        assert!(html.contains("margin-left: auto; margin-right: auto"));
+    }
+
+    #[test]
+    fn test_block_width_without_center_align_has_no_auto_margin() {
+        let doc = parse_document("{block-width: 60%}\n段落\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("width: 60%"));
+        assert!(!html.contains("margin-left"));
     }
 
     #[test]

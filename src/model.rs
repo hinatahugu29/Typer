@@ -86,6 +86,8 @@ pub struct BlockAttributes {
     pub header_bg: Option<String>,
     /// 引用ブロックを左バー付きの塗りつぶしではなく、全周を罫線で囲んだボックス表示にする
     pub boxed: bool,
+    /// ブロック単位の表示幅（表以外の見出し・段落・引用などに使用。例: "60%", "100mm"）
+    pub block_width: Option<String>,
 }
 
 impl BlockAttributes {
@@ -97,6 +99,7 @@ impl BlockAttributes {
             && self.color.is_none()
             && self.header_bg.is_none()
             && !self.boxed
+            && self.block_width.is_none()
     }
 }
 

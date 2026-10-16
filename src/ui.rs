@@ -1427,6 +1427,13 @@ impl eframe::App for TyperApp {
                     self.insert_at_cursor("\n{align: center, size: 15pt}\n**文書タイトル**\n");
                 }
                 if ui
+                    .small_button("⬌ 幅指定")
+                    .on_hover_text("カーソル位置に段落の表示幅（中央寄せ）指定を挿入します")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n{align: center, block-width: 60%}\n");
+                }
+                if ui
                     .small_button("↕ 行間指定")
                     .on_hover_text("カーソル位置に段落の行間指定を挿入します")
                     .clicked()

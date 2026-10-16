@@ -305,6 +305,11 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
         current = format!("#text(fill: rgb(\"{safe_color}\"))[{current}]");
     }
 
+    if let Some(block_width) = &attrs.block_width {
+        let safe_width = sanitize_length(block_width, "100%");
+        current = format!("#block(width: {safe_width})[{current}]");
+    }
+
     if let Some(align) = attrs.align {
         let align_kw = match align {
             Alignment::Left => "left",
@@ -644,6 +649,14 @@ mod tests {
         let doc = parse_document("{color: red}\n段落\n");
         let code = generate_typst_source(&doc);
         assert!(code.contains("#text(fill: rgb(\"#c5221f\"))"));
+    }
+
+    #[test]
+    fn test_block_width_attribute_wraps_block_and_align() {
+        let doc = parse_document("{align: center, block-width: 60%}\n段落\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#block(width: 60%)"));
+        assert!(code.contains("#align(center)"));
     }
 
     #[test]

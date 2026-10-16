@@ -630,6 +630,7 @@ fn is_standalone_block_attr_line(trimmed: &str) -> bool {
                 | "color"
                 | "c"
                 | "header-bg"
+                | "block-width"
         )
     } else {
         false
@@ -689,6 +690,11 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
                 "header-bg" => {
                     if let Some(c) = normalize_color(val) {
                         attrs.header_bg = Some(c);
+                    }
+                }
+                "block-width" => {
+                    if !val.is_empty() {
+                        attrs.block_width = Some(val.to_string());
                     }
                 }
                 _ => {}
@@ -1048,6 +1054,19 @@ line-height: 1.4
                 assert_eq!(attrs.header_bg.as_deref(), Some("#fdf0e6"));
             }
             other => panic!("expected table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_block_width_attribute_parsed_and_not_confused_with_table_width() {
+        let doc = parse_document("{align: center, block-width: 60%}\n段落本文\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { attrs, .. } => {
+                assert_eq!(attrs.block_width.as_deref(), Some("60%"));
+                assert_eq!(attrs.align, Some(Alignment::Center));
+                assert!(attrs.widths.is_none());
+            }
+            other => panic!("expected paragraph, got {other:?}"),
         }
     }
 
