@@ -3,7 +3,7 @@
 //! ページ境界（改ページ指定等）に依存しない、ブラウザ上で読みやすいHTML+CSSを生成する。
 //! ローカル画像が存在する場合はBase64データURIとしてHTML内に直接埋め込み、単一ファイルで完結させる。
 
-use crate::model::{Alignment, Block, BlockAttributes, Document, FontChoice, Inline};
+use crate::model::{Alignment, Block, BlockAttributes, Document, FontChoice, Inline, InlineStyle};
 use crate::typst_gen::resolve_local_image_path;
 use std::fmt::Write;
 use std::path::Path;
@@ -267,10 +267,8 @@ fn render_html_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             for row in rows {
                 out.push_str("    <tr>\n");
                 for (i, cell) in row.iter().enumerate() {
-                    let align_style = cell_align_attr(alignments.get(i).copied().flatten());
-                    let _ = write!(out, "      <td{align_style}>");
-                    render_html_inlines(out, cell, base_dir);
-                    out.push_str("</td>\n");
+                    let align = alignments.get(i).copied().flatten();
+                    render_html_table_cell(out, cell, align, base_dir);
                 }
                 out.push_str("    </tr>\n");
             }
@@ -362,6 +360,52 @@ fn cell_align_attr(align: Option<Alignment>) -> &'static str {
         Some(Alignment::Right) => " style=\"text-align: right\"",
         None => "",
     }
+}
+
+fn cell_align_css(align: Option<Alignment>) -> Option<&'static str> {
+    match align {
+        Some(Alignment::Left) => Some("text-align: left"),
+        Some(Alignment::Center) => Some("text-align: center"),
+        Some(Alignment::Right) => Some("text-align: right"),
+        None => None,
+    }
+}
+
+/// セル内容が丸ごと `{bg: ...}` で装飾されている場合は、`<td>` 自体の背景色として扱い
+/// セル単位の完全な塗りつぶしを行う。それ以外は従来通り内容をそのまま描画する。
+fn render_html_table_cell(
+    out: &mut String,
+    cell: &[Inline],
+    align: Option<Alignment>,
+    base_dir: Option<&Path>,
+) {
+    if let [Inline::Styled { content, style }] = cell {
+        if let Some(bg) = &style.bg {
+            let mut remaining_style = style.clone();
+            remaining_style.bg = None;
+            let cell_content = if remaining_style == InlineStyle::default() {
+                content.clone()
+            } else {
+                vec![Inline::Styled {
+                    content: content.clone(),
+                    style: remaining_style,
+                }]
+            };
+            let mut css = format!("background-color: {}", sanitize_color_hex(bg));
+            if let Some(align_css) = cell_align_css(align) {
+                css.push_str("; ");
+                css.push_str(align_css);
+            }
+            let _ = write!(out, "      <td style=\"{css}\">");
+            render_html_inlines(out, &cell_content, base_dir);
+            out.push_str("</td>\n");
+            return;
+        }
+    }
+    let align_style = cell_align_attr(align);
+    let _ = write!(out, "      <td{align_style}>");
+    render_html_inlines(out, cell, base_dir);
+    out.push_str("</td>\n");
 }
 
 fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>) {
@@ -603,6 +647,20 @@ mod tests {
         let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
         let html = generate_html(&doc);
         assert!(html.contains("<tr style=\"background-color: #fdf0e6\">"));
+    }
+
+    #[test]
+    fn test_table_cell_whole_bg_emits_td_background_color() {
+        // セル内容が丸ごと {bg:...} の場合は <span> ハイライトではなく
+        // <td> 自体の background-color として塗りつぶされる
+        let doc =
+            parse_document("| A | B |\n| :--- | :--- |\n| [全体塗り]{bg: #fff2cc} | 普通セル |\n");
+        let html = generate_html(&doc);
+        assert!(
+            html.contains(
+                "<td style=\"background-color: #fff2cc; text-align: left\">全体塗り</td>"
+            )
+        );
     }
 
     #[test]

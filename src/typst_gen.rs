@@ -3,7 +3,9 @@
 //! 日本語の社内報告書・業務文書に適した組版ルール（フォント、余白、見出し直後の改ページ抑制、
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
-use crate::model::{Alignment, Block, BlockAttributes, Document, FontChoice, Inline, Orientation};
+use crate::model::{
+    Alignment, Block, BlockAttributes, Document, FontChoice, Inline, InlineStyle, Orientation,
+};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -265,9 +267,8 @@ fn render_table(
     if !headers.is_empty() {
         table_code.push_str("  table.header(");
         for cell in headers.iter().take(col_count) {
-            table_code.push_str("[*");
-            render_inlines(&mut table_code, cell, base_dir);
-            table_code.push_str("*], ");
+            render_table_cell(&mut table_code, cell, base_dir, Some("*"), Some("*"));
+            table_code.push_str(", ");
         }
         for _ in headers.len()..col_count {
             table_code.push_str("[], ");
@@ -278,9 +279,8 @@ fn render_table(
     for row in rows {
         table_code.push_str("  ");
         for cell in row.iter().take(col_count) {
-            table_code.push('[');
-            render_inlines(&mut table_code, cell, base_dir);
-            table_code.push_str("], ");
+            render_table_cell(&mut table_code, cell, base_dir, None, None);
+            table_code.push_str(", ");
         }
         for _ in row.len()..col_count {
             table_code.push_str("[], ");
@@ -290,6 +290,44 @@ fn render_table(
 
     table_code.push(')');
     wrap_with_block_attrs(out, &table_code, attrs);
+}
+
+/// セル内容が丸ごと `{bg: ...}` で装飾されている場合、そのセル全体の背景色として扱い、
+/// `table.cell(fill: ...)` でセル単位の完全な塗りつぶしを行う。
+/// それ以外の通常セルは従来通り `[内容]` のコンテンツブロックとして描画する。
+fn render_table_cell(
+    out: &mut String,
+    cell: &[Inline],
+    base_dir: Option<&Path>,
+    content_prefix: Option<&str>,
+    content_suffix: Option<&str>,
+) {
+    if let [Inline::Styled { content, style }] = cell {
+        if let Some(bg) = &style.bg {
+            let mut remaining_style = style.clone();
+            remaining_style.bg = None;
+            let cell_content = if remaining_style == InlineStyle::default() {
+                content.clone()
+            } else {
+                vec![Inline::Styled {
+                    content: content.clone(),
+                    style: remaining_style,
+                }]
+            };
+            let safe_bg = sanitize_color_hex(bg);
+            let _ = write!(out, "table.cell(fill: rgb(\"{safe_bg}\"))[");
+            out.push_str(content_prefix.unwrap_or(""));
+            render_inlines(out, &cell_content, base_dir);
+            out.push_str(content_suffix.unwrap_or(""));
+            out.push(']');
+            return;
+        }
+    }
+    out.push('[');
+    out.push_str(content_prefix.unwrap_or(""));
+    render_inlines(out, cell, base_dir);
+    out.push_str(content_suffix.unwrap_or(""));
+    out.push(']');
 }
 
 fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttributes) {
@@ -686,6 +724,17 @@ mod tests {
         let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
         let code = generate_typst_source(&doc);
         assert!(code.contains("fill: (_, y) => if y == 0 { rgb(\"#fdf0e6\") } else { none }"));
+    }
+
+    #[test]
+    fn test_table_cell_whole_bg_renders_as_table_cell_fill_not_highlight() {
+        // セル内容が丸ごと {bg:...} の場合は #highlight() ではなく
+        // table.cell(fill: ...) によるセル単位の完全な塗りつぶしになる
+        let doc =
+            parse_document("| A | B |\n| :--- | :--- |\n| [全体塗り]{bg: #fff2cc} | 普通セル |\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("table.cell(fill: rgb(\"#fff2cc\"))[全体塗り]"));
+        assert!(!code.contains("#highlight"));
     }
 
     #[test]

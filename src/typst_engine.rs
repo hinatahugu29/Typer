@@ -327,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn test_table_cell_whole_bg_compiles_and_renders() {
+        // `[セル全体]{bg: ...}` によるセル単位の完全な塗りつぶしが
+        // Typstコンパイル・プレビュー描画・PDF出力までエラーなく通ることを確認する
+        let src = "| A | B |\n| :--- | :--- |\n| [全体塗り]{bg: #fff2cc} | 普通セル |\n";
+        let doc = parse_document(src);
+        let typst_code = generate_typst_source(&doc);
+        assert!(typst_code.contains("table.cell(fill: rgb(\"#fff2cc\"))"));
+
+        let mut engine = TypstEngine::new();
+        let preview = engine
+            .render_preview(&typst_code, 1.5)
+            .expect("whole-cell bg table should render without error");
+        assert!(!preview.pages.is_empty());
+
+        let pdf_bytes = engine
+            .export_pdf(&typst_code)
+            .expect("whole-cell bg table should export to PDF without error");
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
     fn test_ordered_list_custom_start_number_compiles_and_renders() {
         // Markdownの "5. 項目" のように1以外から始まる番号付きリストが
         // Typstコンパイル・プレビュー描画・PDF出力までエラーなく通ることを確認する
