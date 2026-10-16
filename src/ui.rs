@@ -1580,4 +1580,127 @@ mod tests {
         assert_eq!(char_idx_to_line_col(s, 2), (1, 3));
         assert_eq!(char_idx_to_line_col(s, 4), (2, 1));
     }
+
+    /// `TyperApp::new` はウィンドウ・GPUコンテキストを要するため、
+    /// テキスト編集系ロジックのみを検証するための軽量インスタンスを直接構築する
+    fn test_app(markdown: &str) -> TyperApp {
+        let (worker_tx, _worker_req_rx) = mpsc::channel::<WorkerRequest>();
+        let (_worker_res_tx, worker_rx) = mpsc::channel::<WorkerResponse>();
+        TyperApp {
+            markdown_text: markdown.to_string(),
+            last_typst_code: String::new(),
+            current_file: None,
+            is_dirty: false,
+            last_window_title: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            cursor_char_range: None,
+            pending_cursor_selection: None,
+            show_find_replace: false,
+            find_query: String::new(),
+            replace_text: String::new(),
+            current_match_index: 0,
+            show_page_settings_bar: true,
+            pending_action: None,
+            allow_immediate_close: false,
+            revision: 1,
+            pending_render: false,
+            last_edit_time: Instant::now(),
+            worker_tx,
+            worker_rx,
+            is_compiling: false,
+            page_textures: Vec::new(),
+            last_compile_ms: 0.0,
+            last_error: None,
+            zoom: 1.0,
+            show_typst_source: false,
+            status_message: String::new(),
+            startup_visibility_ensured: false,
+        }
+    }
+
+    #[test]
+    fn test_undo_redo_roundtrip() {
+        let mut app = test_app("hello");
+        app.push_undo_snapshot();
+        app.markdown_text = "hello world".to_string();
+
+        app.perform_undo();
+        assert_eq!(app.markdown_text, "hello");
+        assert!(app.is_dirty);
+
+        app.perform_redo();
+        assert_eq!(app.markdown_text, "hello world");
+
+        // undo/redoスタックが空の場合は何もしない
+        app.undo_stack.clear();
+        app.redo_stack.clear();
+        app.perform_undo();
+        assert_eq!(app.markdown_text, "hello world");
+        app.perform_redo();
+        assert_eq!(app.markdown_text, "hello world");
+    }
+
+    #[test]
+    fn test_wrap_selection_with_selection() {
+        let mut app = test_app("あいうえお");
+        // "いう" (char index 1..3) を選択した状態で太字化
+        app.cursor_char_range = Some((1, 3));
+        app.wrap_selection_or_insert("**", "太字", "**");
+        assert_eq!(app.markdown_text, "あ**いう**えお");
+        assert_eq!(app.cursor_char_range, Some((3, 5)));
+    }
+
+    #[test]
+    fn test_wrap_selection_without_selection_inserts_default() {
+        let mut app = test_app("あ");
+        app.cursor_char_range = Some((1, 1));
+        app.wrap_selection_or_insert("**", "太字", "**");
+        assert_eq!(app.markdown_text, "あ**太字**");
+        assert_eq!(app.cursor_char_range, Some((3, 5)));
+    }
+
+    #[test]
+    fn test_find_matches_with_multibyte_text() {
+        let mut app = test_app("あいうえおあいう");
+        app.find_query = "あい".to_string();
+        let matches = app.find_matches();
+        assert_eq!(matches, vec![(0, 2), (5, 7)]);
+    }
+
+    #[test]
+    fn test_find_matches_empty_query_returns_none() {
+        let app = test_app("あいうえお");
+        assert!(app.find_matches().is_empty());
+    }
+
+    #[test]
+    fn test_replace_current_match() {
+        let mut app = test_app("あいうえおあいう");
+        app.find_query = "あい".to_string();
+        app.replace_text = "X".to_string();
+        app.current_match_index = 0;
+        app.replace_current_match();
+        assert_eq!(app.markdown_text, "Xうえおあいう");
+        assert_eq!(app.cursor_char_range, Some((0, 1)));
+    }
+
+    #[test]
+    fn test_replace_all_matches() {
+        let mut app = test_app("あいうえおあいう");
+        app.find_query = "あい".to_string();
+        app.replace_text = "X".to_string();
+        app.replace_all_matches();
+        assert_eq!(app.markdown_text, "XうえおXう");
+    }
+
+    #[test]
+    fn test_replace_all_matches_no_match_leaves_text_unchanged() {
+        let mut app = test_app("あいうえお");
+        app.find_query = "存在しない".to_string();
+        app.replace_text = "X".to_string();
+        app.replace_all_matches();
+        assert_eq!(app.markdown_text, "あいうえお");
+        assert!(app.undo_stack.is_empty());
+    }
 }
