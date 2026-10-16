@@ -626,14 +626,28 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
 /// 2) `{color:red|テキスト}` / `{red:テキスト}`
 /// を展開する
 fn expand_custom_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+    // pulldown-cmark は `[重要]{red}` のような連続したテキストを `[重要]` と `{red}` のように
+    // 複数の `Event::Text` へ分割することがあるため、独自記法の境界をまたいで見失わないよう、
+    // 隣接する `Inline::Text` をいったん1つの文字列へ結合してから走査する
     let mut out = Vec::with_capacity(inlines.len());
+    let mut text_buf = String::new();
+
     for inline in inlines {
         match inline {
             Inline::Text(s) => {
-                parse_inline_custom_spans(&s, &mut out);
+                text_buf.push_str(&s);
             }
-            other => out.push(other),
+            other => {
+                if !text_buf.is_empty() {
+                    parse_inline_custom_spans(&text_buf, &mut out);
+                    text_buf.clear();
+                }
+                out.push(other);
+            }
         }
+    }
+    if !text_buf.is_empty() {
+        parse_inline_custom_spans(&text_buf, &mut out);
     }
     out
 }

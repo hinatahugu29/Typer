@@ -433,3 +433,62 @@ fn html_escape(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    #[test]
+    fn test_html_escape_escapes_all_special_chars() {
+        assert_eq!(
+            html_escape(r#"<a>&"'"#),
+            "&lt;a&gt;&amp;&quot;&#39;"
+        );
+        assert_eq!(html_escape("普通の日本語"), "普通の日本語");
+    }
+
+    #[test]
+    fn test_encode_base64_matches_known_vectors() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn test_generate_html_escapes_text_and_wraps_heading() {
+        let doc = parse_document("# <タイトル>\n\n本文&説明\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<h1>&lt;タイトル&gt;</h1>"));
+        assert!(html.contains("<p>本文&amp;説明</p>"));
+    }
+
+    #[test]
+    fn test_generate_html_table_with_widths_emits_colgroup() {
+        let doc = parse_document(
+            "{widths: 30%, 70%}\n| 項目 | 内容 |\n| :--- | :--- |\n| A | B |\n",
+        );
+        let html = generate_html(&doc);
+        assert!(html.contains("<colgroup>"));
+        assert!(html.contains("width: 30%;"));
+        assert!(html.contains("項目</th>"));
+    }
+
+    #[test]
+    fn test_generate_html_missing_image_falls_back_to_escaped_url() {
+        let doc = parse_document("![代替テキスト](does_not_exist.png)\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("<img src=\"does_not_exist.png\""));
+        assert!(html.contains("代替テキスト"));
+    }
+
+    #[test]
+    fn test_generate_html_styled_inline_emits_inline_style() {
+        let doc = parse_document("[重要]{red}\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("style=\"color: #c5221f\""));
+        assert!(html.contains("重要"));
+    }
+}

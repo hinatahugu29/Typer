@@ -521,3 +521,71 @@ fn sanitize_color_hex(raw: &str) -> String {
         "#c5221f".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    #[test]
+    fn test_escape_typst_text_escapes_special_chars() {
+        let mut out = String::new();
+        escape_typst_text(&mut out, "#[a*b]_c_");
+        assert_eq!(out, "\\#\\[a\\*b\\]\\_c\\_");
+    }
+
+    #[test]
+    fn test_sanitize_length_accepts_valid_and_falls_back_on_invalid() {
+        assert_eq!(sanitize_length("12pt", "10.5pt"), "12pt");
+        assert_eq!(sanitize_length("  20mm ", "20mm"), "20mm");
+        assert_eq!(sanitize_length("not-a-length", "10.5pt"), "10.5pt");
+        assert_eq!(sanitize_length("-5pt", "10.5pt"), "10.5pt");
+        assert_eq!(sanitize_length("9999pt", "10.5pt"), "10.5pt");
+    }
+
+    #[test]
+    fn test_sanitize_column_width_variants() {
+        assert_eq!(sanitize_column_width("auto"), "auto");
+        assert_eq!(sanitize_column_width("2fr"), "2fr");
+        assert_eq!(sanitize_column_width("30%"), "30fr");
+        assert_eq!(sanitize_column_width("garbage"), "auto");
+    }
+
+    #[test]
+    fn test_sanitize_color_hex_accepts_hex_and_falls_back() {
+        assert_eq!(sanitize_color_hex("#1a73e8"), "#1a73e8");
+        assert_eq!(sanitize_color_hex("#fff"), "#fff");
+        assert_eq!(sanitize_color_hex("not-a-color"), "#c5221f");
+    }
+
+    #[test]
+    fn test_local_image_vpath_roundtrip() {
+        let path = Path::new(r"C:\報告書\図1.png");
+        let vpath = encode_local_image_vpath(path);
+        assert!(vpath.starts_with(LOCAL_IMAGE_VPATH_PREFIX));
+        assert!(vpath.ends_with(".png"));
+        let decoded = decode_local_image_vpath(&vpath).expect("should decode");
+        assert_eq!(decoded, path);
+    }
+
+    #[test]
+    fn test_resolve_local_image_path_rejects_remote_urls() {
+        assert_eq!(resolve_local_image_path("https://example.com/a.png", None), None);
+        assert_eq!(resolve_local_image_path("http://example.com/a.png", None), None);
+        assert_eq!(resolve_local_image_path("", None), None);
+    }
+
+    #[test]
+    fn test_generate_typst_source_missing_image_renders_placeholder() {
+        let doc = parse_document("![caption](does_not_exist.png)\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("画像未検出"));
+    }
+
+    #[test]
+    fn test_generate_typst_source_escapes_inline_text() {
+        let doc = parse_document("価格は#100[税込]*です*\n");
+        let code = generate_typst_source(&doc);
+        assert!(!code.contains("価格は#100"));
+    }
+}
