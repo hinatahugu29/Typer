@@ -149,6 +149,10 @@ pub enum Inline {
         text: Vec<Inline>,
         url: String,
     },
+    Image {
+        alt: String,
+        url: String,
+    },
     SoftBreak,
     HardBreak,
 }

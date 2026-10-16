@@ -1,24 +1,27 @@
 //! デスクトップUI層 (`egui` / `eframe`)
 //!
-//! - 左ペイン：独自拡張構文のシンタックスハイライト付きテキストエディタ＋クイック挿入バー
-//! - 右ペイン：Typst組版結果のリアルタイムページプレビュー（ズーム・複数ページスクロール対応）
-//! - バックグラウンドワーカースレッドによる非同期組版（エディタのキー入力を一切ブロックしない構成）
+//! - 左ペイン：シンタックスハイライト付きエディタ、カーソル位置への書式挿入・選択範囲ラップ、
+//!   検索・置換バー (`Ctrl+F` / `Ctrl+H`)、Undo/Redo履歴、ページ設定GUIバー
+//! - 右ペイン：Typst組版結果のリアルタイムページプレビュー（`Ctrl+ホイール` ズーム・複数ページ対応）
+//! - 安全性・操作性：未保存変更時の終了・読み込み確認モーダル、ドラッグ＆ドロップ読み込み（文書・画像）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Key, Modifiers, RichText,
-    Sense, Stroke, TextEdit, TextFormat, TextureHandle, TextureOptions, Vec2, text::LayoutJob,
+    Sense, Stroke, TextEdit, TextFormat, TextureHandle, TextureOptions, Vec2, ViewportCommand,
+    text::{CCursor, CCursorRange, LayoutJob},
 };
 
-use crate::html_export::generate_html;
-use crate::parser::parse_document;
+use crate::html_export::generate_html_with_base;
+use crate::model::{FontChoice, Orientation};
+use crate::parser::{parse_document, update_document_settings_in_markdown};
 use crate::sample::SAMPLE_DOCUMENT;
 use crate::typst_engine::{PreviewOutput, TypstEngine};
-use crate::typst_gen::generate_typst_source;
+use crate::typst_gen::generate_typst_source_with_base;
 
 enum WorkerRequest {
     RenderPreview {
@@ -35,6 +38,15 @@ enum WorkerResponse {
     },
 }
 
+/// 未保存の変更がある状態で実行しようとした保留アクション
+#[derive(Debug, Clone)]
+enum PendingAction {
+    NewFile,
+    OpenFileDialog,
+    LoadFilePath(PathBuf),
+    CloseWindow,
+}
+
 pub struct TyperApp {
     /// 編集中の原稿テキスト
     markdown_text: String,
@@ -44,6 +56,30 @@ pub struct TyperApp {
     current_file: Option<PathBuf>,
     /// 未保存の変更があるか
     is_dirty: bool,
+    /// 直近設定したウィンドウタイトル
+    last_window_title: String,
+
+    /// Undo / Redo スタック
+    undo_stack: Vec<String>,
+    redo_stack: Vec<String>,
+
+    /// エディタの現在のカーソル・選択範囲（文字インデックス単位）
+    cursor_char_range: Option<(usize, usize)>,
+    /// 次フレームでエディタに適用する新しいカーソル・選択範囲（文字インデックス単位）
+    pending_cursor_selection: Option<(usize, usize)>,
+
+    /// 検索・置換パネルの状態
+    show_find_replace: bool,
+    find_query: String,
+    replace_text: String,
+    current_match_index: usize,
+
+    /// ページ・基本書式設定GUIバーの表示フラグ
+    show_page_settings_bar: bool,
+
+    /// 未保存確認ダイアログ用の保留アクション
+    pending_action: Option<PendingAction>,
+    allow_immediate_close: bool,
 
     /// プレビュー更新のデバウンス管理
     revision: u64,
@@ -87,7 +123,6 @@ impl TyperApp {
                         mut typst_code,
                         mut pixel_per_pt,
                     } => {
-                        // キューに後続のリクエストが溜まっていれば最新のものだけを処理する
                         while let Ok(newer) = req_rx.try_recv() {
                             match newer {
                                 WorkerRequest::RenderPreview {
@@ -112,13 +147,25 @@ impl TyperApp {
 
         let initial_text = SAMPLE_DOCUMENT.to_string();
         let doc = parse_document(&initial_text);
-        let typst_code = generate_typst_source(&doc);
+        let typst_code = generate_typst_source_with_base(&doc, None);
 
         let mut app = Self {
             markdown_text: initial_text,
             last_typst_code: typst_code,
             current_file: None,
             is_dirty: false,
+            last_window_title: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            cursor_char_range: None,
+            pending_cursor_selection: None,
+            show_find_replace: false,
+            find_query: String::new(),
+            replace_text: String::new(),
+            current_match_index: 0,
+            show_page_settings_bar: true,
+            pending_action: None,
+            allow_immediate_close: false,
             revision: 1,
             pending_render: false,
             last_edit_time: Instant::now(),
@@ -137,13 +184,54 @@ impl TyperApp {
         app
     }
 
+    fn base_dir(&self) -> Option<PathBuf> {
+        self.current_file
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        if self.undo_stack.last().map(|s| s.as_str()) != Some(self.markdown_text.as_str()) {
+            if self.undo_stack.len() >= 100 {
+                self.undo_stack.remove(0);
+            }
+            self.undo_stack.push(self.markdown_text.clone());
+            self.redo_stack.clear();
+        }
+    }
+
+    fn perform_undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(self.markdown_text.clone());
+            self.markdown_text = prev;
+            self.is_dirty = true;
+            self.revision += 1;
+            self.pending_render = true;
+            self.last_edit_time = Instant::now();
+            self.status_message = "元に戻しました (Undo)".to_string();
+        }
+    }
+
+    fn perform_redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(self.markdown_text.clone());
+            self.markdown_text = next;
+            self.is_dirty = true;
+            self.revision += 1;
+            self.pending_render = true;
+            self.last_edit_time = Instant::now();
+            self.status_message = "やり直しました (Redo)".to_string();
+        }
+    }
+
     fn trigger_preview_update(&mut self) {
         let doc = parse_document(&self.markdown_text);
-        self.last_typst_code = generate_typst_source(&doc);
+        let base = self.base_dir();
+        self.last_typst_code = generate_typst_source_with_base(&doc, base.as_deref());
         self.is_compiling = true;
         self.pending_render = false;
 
-        // 高DPI環境やズーム時にも文字がくっきり見えるよう 2.0 px/pt を基準にする
         let pixel_per_pt = (2.0 * self.zoom).clamp(1.2, 3.5);
         let _ = self.worker_tx.send(WorkerRequest::RenderPreview {
             revision: self.revision,
@@ -166,6 +254,7 @@ impl TyperApp {
                             self.last_error = None;
                             self.page_textures.clear();
 
+                            let scale_divisor = (2.0 * self.zoom).clamp(1.2, 3.5);
                             for (idx, page) in output.pages.into_iter().enumerate() {
                                 let size = [page.width as usize, page.height as usize];
                                 let color_image = ColorImage::from_rgba_premultiplied(
@@ -177,16 +266,14 @@ impl TyperApp {
                                     color_image,
                                     TextureOptions::LINEAR,
                                 );
-                                // A4の基本表示サイズ（pt単位に近い論理サイズ）
                                 let logical_size = Vec2::new(
-                                    page.width as f32 / (2.0 * self.zoom).clamp(1.2, 3.5),
-                                    page.height as f32 / (2.0 * self.zoom).clamp(1.2, 3.5),
+                                    page.width as f32 / scale_divisor,
+                                    page.height as f32 / scale_divisor,
                                 );
                                 self.page_textures.push((tex, logical_size));
                             }
                         }
                         Err(err) => {
-                            // エラー発生時も直前の有効なプレビューは維持し、エラー内容のみ保持する
                             self.last_error = Some(err);
                         }
                     }
@@ -195,37 +282,63 @@ impl TyperApp {
         }
     }
 
-    fn action_new_file(&mut self) {
-        self.markdown_text = "---\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n".to_string();
-        self.current_file = None;
-        self.is_dirty = false;
-        self.revision += 1;
-        self.trigger_preview_update();
-        self.status_message = "新規文書を作成しました".to_string();
+    fn request_action(&mut self, action: PendingAction, ctx: &egui::Context) {
+        if self.is_dirty {
+            self.pending_action = Some(action);
+        } else {
+            self.execute_pending_action(action, ctx);
+        }
     }
 
-    fn action_open_file(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown文書 (*.md, *.txt)", &["md", "txt"])
-            .pick_file()
-        {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    self.markdown_text = content;
-                    self.current_file = Some(path.clone());
-                    self.is_dirty = false;
-                    self.revision += 1;
-                    self.trigger_preview_update();
-                    self.status_message = format!("読み込み完了: {}", path.display());
+    fn execute_pending_action(&mut self, action: PendingAction, ctx: &egui::Context) {
+        match action {
+            PendingAction::NewFile => {
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.markdown_text = "---\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n".to_string();
+                self.current_file = None;
+                self.is_dirty = false;
+                self.revision += 1;
+                self.trigger_preview_update();
+                self.status_message = "新規文書を作成しました".to_string();
+            }
+            PendingAction::OpenFileDialog => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Markdown文書 (*.md, *.txt)", &["md", "txt"])
+                    .pick_file()
+                {
+                    self.load_file_from_path(path);
                 }
-                Err(e) => {
-                    self.status_message = format!("ファイル読み込みエラー: {e}");
-                }
+            }
+            PendingAction::LoadFilePath(path) => {
+                self.load_file_from_path(path);
+            }
+            PendingAction::CloseWindow => {
+                self.allow_immediate_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         }
     }
 
-    fn action_save_file(&mut self, save_as: bool) {
+    fn load_file_from_path(&mut self, path: PathBuf) {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.markdown_text = content;
+                self.current_file = Some(path.clone());
+                self.is_dirty = false;
+                self.revision += 1;
+                self.trigger_preview_update();
+                self.status_message = format!("読み込み完了: {}", path.display());
+            }
+            Err(e) => {
+                self.status_message = format!("ファイル読み込みエラー: {e}");
+            }
+        }
+    }
+
+    fn action_save_file(&mut self, save_as: bool) -> bool {
         let target_path = if save_as || self.current_file.is_none() {
             rfd::FileDialog::new()
                 .add_filter("Markdown文書 (*.md)", &["md"])
@@ -240,13 +353,17 @@ impl TyperApp {
                 Ok(()) => {
                     self.current_file = Some(path.clone());
                     self.is_dirty = false;
+                    self.revision += 1;
+                    self.trigger_preview_update();
                     self.status_message = format!("保存しました: {}", path.display());
+                    return true;
                 }
                 Err(e) => {
                     self.status_message = format!("保存エラー: {e}");
                 }
             }
         }
+        false
     }
 
     fn action_export_pdf(&mut self) {
@@ -263,13 +380,17 @@ impl TyperApp {
             .set_file_name(&default_name)
             .save_file()
         {
+            let start = Instant::now();
             let doc = parse_document(&self.markdown_text);
-            let typst_code = generate_typst_source(&doc);
+            let base = self.base_dir();
+            let typst_code = generate_typst_source_with_base(&doc, base.as_deref());
             let mut engine = TypstEngine::new();
             match engine.export_pdf(&typst_code) {
                 Ok(pdf_bytes) => match std::fs::write(&path, pdf_bytes) {
                     Ok(()) => {
-                        self.status_message = format!("PDFを出力しました: {}", path.display());
+                        let ms = start.elapsed().as_secs_f64() * 1000.0;
+                        self.status_message =
+                            format!("PDFを出力しました ({ms:.1} ms): {}", path.display());
                     }
                     Err(e) => {
                         self.status_message = format!("PDF書き込みエラー: {e}");
@@ -297,7 +418,8 @@ impl TyperApp {
             .save_file()
         {
             let doc = parse_document(&self.markdown_text);
-            let html = generate_html(&doc);
+            let base = self.base_dir();
+            let html = generate_html_with_base(&doc, base.as_deref());
             match std::fs::write(&path, html) {
                 Ok(()) => {
                     self.status_message = format!("HTMLを出力しました: {}", path.display());
@@ -309,15 +431,213 @@ impl TyperApp {
         }
     }
 
-    fn insert_snippet(&mut self, snippet: &str) {
-        if !self.markdown_text.ends_with('\n') && !self.markdown_text.is_empty() {
-            self.markdown_text.push('\n');
+    fn action_insert_image_dialog(&mut self) {
+        if let Some(img_path) = rfd::FileDialog::new()
+            .add_filter(
+                "画像ファイル (*.png, *.jpg, *.jpeg, *.gif, *.svg, *.webp)",
+                &["png", "jpg", "jpeg", "gif", "svg", "webp"],
+            )
+            .pick_file()
+        {
+            self.insert_image_path(&img_path);
         }
-        self.markdown_text.push_str(snippet);
+    }
+
+    fn insert_image_path(&mut self, img_path: &Path) {
+        let stem = img_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("画像");
+        let display_path = if let Some(base) = self.base_dir() {
+            if let Ok(rel) = img_path.strip_prefix(&base) {
+                rel.to_string_lossy().replace('\\', "/")
+            } else {
+                img_path.to_string_lossy().replace('\\', "/")
+            }
+        } else if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = img_path.strip_prefix(&cwd) {
+                rel.to_string_lossy().replace('\\', "/")
+            } else {
+                img_path.to_string_lossy().replace('\\', "/")
+            }
+        } else {
+            img_path.to_string_lossy().replace('\\', "/")
+        };
+
+        let snippet = format!("![{stem}]({display_path})");
+        self.insert_at_cursor(&snippet);
+        self.status_message = format!("画像を挿入しました: {display_path}");
+    }
+
+    /// 現在のカーソル位置にテキストを挿入する（選択範囲がある場合は置き換える）
+    fn insert_at_cursor(&mut self, snippet: &str) {
+        self.push_undo_snapshot();
+
+        let total_chars = self.markdown_text.chars().count();
+        let (start_char, end_char) = self
+            .cursor_char_range
+            .unwrap_or((total_chars, total_chars));
+        let start_byte = char_to_byte_idx(&self.markdown_text, start_char);
+        let end_byte = char_to_byte_idx(&self.markdown_text, end_char);
+
+        self.markdown_text
+            .replace_range(start_byte..end_byte, snippet);
+
+        let snippet_chars = snippet.chars().count();
+        let new_pos = start_char + snippet_chars;
+        self.cursor_char_range = Some((new_pos, new_pos));
+        self.pending_cursor_selection = Some((new_pos, new_pos));
+
         self.is_dirty = true;
         self.revision += 1;
         self.pending_render = true;
         self.last_edit_time = Instant::now();
+    }
+
+    /// 選択中のテキストがあれば `prefix` と `suffix` で囲み、なければ `prefix + default_inner + suffix` を挿入する
+    fn wrap_selection_or_insert(&mut self, prefix: &str, default_inner: &str, suffix: &str) {
+        self.push_undo_snapshot();
+
+        let total_chars = self.markdown_text.chars().count();
+        let (start_char, end_char) = self
+            .cursor_char_range
+            .unwrap_or((total_chars, total_chars));
+        let start_byte = char_to_byte_idx(&self.markdown_text, start_char);
+        let end_byte = char_to_byte_idx(&self.markdown_text, end_char);
+
+        let prefix_chars = prefix.chars().count();
+        let suffix_chars = suffix.chars().count();
+
+        if start_char < end_char {
+            let selected = self.markdown_text[start_byte..end_byte].to_string();
+            let replacement = format!("{prefix}{selected}{suffix}");
+            let selected_chars = selected.chars().count();
+            self.markdown_text
+                .replace_range(start_byte..end_byte, &replacement);
+            let new_start = start_char + prefix_chars;
+            let new_end = new_start + selected_chars;
+            self.cursor_char_range = Some((new_start, new_end));
+            self.pending_cursor_selection = Some((new_start, new_end));
+        } else {
+            let replacement = format!("{prefix}{default_inner}{suffix}");
+            let inner_chars = default_inner.chars().count();
+            self.markdown_text
+                .replace_range(start_byte..end_byte, &replacement);
+            let new_start = start_char + prefix_chars;
+            let new_end = new_start + inner_chars;
+            let _ = suffix_chars;
+            self.cursor_char_range = Some((new_start, new_end));
+            self.pending_cursor_selection = Some((new_start, new_end));
+        }
+
+        self.is_dirty = true;
+        self.revision += 1;
+        self.pending_render = true;
+        self.last_edit_time = Instant::now();
+    }
+
+    /// 検索クエリに一致するすべての文字インデックス範囲 `(start_char, end_char)` を返す
+    fn find_matches(&self) -> Vec<(usize, usize)> {
+        if self.find_query.is_empty() {
+            return Vec::new();
+        }
+        let mut results = Vec::new();
+        let q_chars = self.find_query.chars().count();
+        for (byte_idx, _) in self.markdown_text.match_indices(&self.find_query) {
+            let start_char = byte_to_char_idx(&self.markdown_text, byte_idx);
+            results.push((start_char, start_char + q_chars));
+        }
+        results
+    }
+
+    fn select_find_match(&mut self, match_idx: usize) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let idx = match_idx % matches.len();
+        self.current_match_index = idx;
+        let (s, e) = matches[idx];
+        self.cursor_char_range = Some((s, e));
+        self.pending_cursor_selection = Some((s, e));
+    }
+
+    fn replace_current_match(&mut self) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+        let idx = self.current_match_index % matches.len();
+        let (s_char, e_char) = matches[idx];
+        let s_byte = char_to_byte_idx(&self.markdown_text, s_char);
+        let e_byte = char_to_byte_idx(&self.markdown_text, e_char);
+
+        let rep = self.replace_text.clone();
+        let rep_chars = rep.chars().count();
+        self.markdown_text.replace_range(s_byte..e_byte, &rep);
+
+        self.cursor_char_range = Some((s_char, s_char + rep_chars));
+        self.pending_cursor_selection = Some((s_char, s_char + rep_chars));
+        self.is_dirty = true;
+        self.revision += 1;
+        self.pending_render = true;
+        self.last_edit_time = Instant::now();
+    }
+
+    fn replace_all_matches(&mut self) {
+        if self.find_query.is_empty() || !self.markdown_text.contains(&self.find_query) {
+            return;
+        }
+        let count = self.markdown_text.matches(&self.find_query).count();
+        self.push_undo_snapshot();
+        self.markdown_text = self
+            .markdown_text
+            .replace(&self.find_query, &self.replace_text);
+        self.is_dirty = true;
+        self.revision += 1;
+        self.pending_render = true;
+        self.last_edit_time = Instant::now();
+        self.status_message = format!("{count} 件をすべて置換しました");
+    }
+
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let name = self
+            .current_file
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("未保存の文書");
+        let dirty = if self.is_dirty { " *" } else { "" };
+        let title = format!("Typer — {name}{dirty}");
+        if title != self.last_window_title {
+            self.last_window_title = title.clone();
+            ctx.send_viewport_cmd(ViewportCommand::Title(title));
+        }
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+
+        for path in dropped {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "md" | "txt" | "markdown") {
+                self.request_action(PendingAction::LoadFilePath(path), ctx);
+                break;
+            } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+                self.insert_image_path(&path);
+            }
+        }
     }
 }
 
@@ -325,16 +645,56 @@ impl eframe::App for TyperApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_worker_responses(&ctx);
+        self.update_window_title(&ctx);
+        self.handle_dropped_files(&ctx);
 
-        // ショートカットキー処理
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
+        // ウィンドウの「×」ボタンによる終了要求のインターセプト（未保存保護）
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.is_dirty && !self.allow_immediate_close {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                self.pending_action = Some(PendingAction::CloseWindow);
+            }
+        }
+
+        // グローバルショートカットキー処理
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S)) {
+            self.action_save_file(true);
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::S)) {
             self.action_save_file(false);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
-            self.action_open_file();
+            self.request_action(PendingAction::OpenFileDialog, &ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
+            self.request_action(PendingAction::NewFile, &ctx);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::P)) {
             self.action_export_pdf();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F))
+            || ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::H))
+        {
+            self.show_find_replace = !self.show_find_replace;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::B)) {
+            self.wrap_selection_or_insert("**", "太字テキスト", "**");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::I)) {
+            self.wrap_selection_or_insert("*", "斜体テキスト", "*");
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) {
+            self.perform_redo();
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Z)) {
+            self.perform_undo();
+        }
+
+        // Ctrl + マウスホイールによるプレビュー拡大・縮小
+        let zoom_delta = ctx.input(|i| i.zoom_delta());
+        if (zoom_delta - 1.0).abs() > 0.001 {
+            self.zoom = (self.zoom * zoom_delta).clamp(0.5, 2.5);
+            self.revision += 1;
+            self.pending_render = true;
+            self.last_edit_time = Instant::now();
         }
 
         // デバウンスされたプレビュー更新チェック（入力停止から120ms後に組版開始）
@@ -347,22 +707,60 @@ impl eframe::App for TyperApp {
             }
         }
 
+        // 未保存確認モーダルダイアログ
+        if let Some(action) = self.pending_action.clone() {
+            egui::Window::new("⚠ 未保存の変更があります")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    ui.label("現在の文書にはまだ保存されていない変更があります。");
+                    ui.label("変更を保存してから続行しますか？");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let save_btn = egui::Button::new(
+                            RichText::new("💾 保存して続行")
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(26, 115, 232));
+                        if ui.add(save_btn).clicked() {
+                            if self.action_save_file(false) {
+                                self.pending_action = None;
+                                self.execute_pending_action(action.clone(), &ctx);
+                            }
+                        }
+                        if ui.button("保存せずに続行").clicked() {
+                            self.pending_action = None;
+                            self.execute_pending_action(action.clone(), &ctx);
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            self.pending_action = None;
+                        }
+                    });
+                });
+        }
+
         // 上部メインツールバー
         egui::Panel::top("top_toolbar")
             .exact_size(42.0)
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = 5.0;
 
-                    if ui.button("🗋 新規").on_hover_text("新規文書を作成します").clicked() {
-                        self.action_new_file();
+                    if ui
+                        .button("🗋 新規")
+                        .on_hover_text("新規文書を作成します (Ctrl+N)")
+                        .clicked()
+                    {
+                        self.request_action(PendingAction::NewFile, &ctx);
                     }
                     if ui
                         .button("📂 開く...")
-                        .on_hover_text("Markdownファイルを読み込みます (Ctrl+O)")
+                        .on_hover_text("Markdownファイルを読み込みます (Ctrl+O / ドロップ対応)")
                         .clicked()
                     {
-                        self.action_open_file();
+                        self.request_action(PendingAction::OpenFileDialog, &ctx);
                     }
                     if ui
                         .button("💾 保存")
@@ -373,10 +771,41 @@ impl eframe::App for TyperApp {
                     }
                     if ui
                         .button("別名保存...")
-                        .on_hover_text("名前を付けて保存します")
+                        .on_hover_text("名前を付けて保存します (Ctrl+Shift+S)")
                         .clicked()
                     {
                         self.action_save_file(true);
+                    }
+
+                    ui.separator();
+
+                    if ui
+                        .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("↶"))
+                        .on_hover_text("元に戻す (Ctrl+Z)")
+                        .clicked()
+                    {
+                        self.perform_undo();
+                    }
+                    if ui
+                        .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↷"))
+                        .on_hover_text("やり直し (Ctrl+Y)")
+                        .clicked()
+                    {
+                        self.perform_redo();
+                    }
+                    if ui
+                        .selectable_label(self.show_find_replace, "🔍 検索・置換")
+                        .on_hover_text("検索・置換バーを開閉します (Ctrl+F)")
+                        .clicked()
+                    {
+                        self.show_find_replace = !self.show_find_replace;
+                    }
+                    if ui
+                        .selectable_label(self.show_page_settings_bar, "⚙ ページ設定")
+                        .on_hover_text("用紙向き・フォント・余白・文字サイズ・行間の設定バーを開閉します")
+                        .clicked()
+                    {
+                        self.show_page_settings_bar = !self.show_page_settings_bar;
                     }
 
                     ui.separator();
@@ -406,30 +835,134 @@ impl eframe::App for TyperApp {
                     }
 
                     ui.separator();
-
-                    ui.checkbox(&mut self.show_typst_source, "Typst変換コード表示");
+                    ui.checkbox(&mut self.show_typst_source, "Typstコード");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("100%").clicked() {
+                        if ui.button("100%").on_hover_text("表示倍率を100%に戻す").clicked() {
                             self.zoom = 1.0;
                             self.revision += 1;
                             self.trigger_preview_update();
                         }
-                        if ui.button("＋").on_hover_text("プレビュー拡大").clicked() {
+                        if ui
+                            .button("＋")
+                            .on_hover_text("プレビュー拡大 (Ctrl+ホイール)")
+                            .clicked()
+                        {
                             self.zoom = (self.zoom + 0.15).clamp(0.5, 2.5);
                             self.revision += 1;
                             self.trigger_preview_update();
                         }
                         ui.label(format!("{:.0}%", self.zoom * 100.0));
-                        if ui.button("－").on_hover_text("プレビュー縮小").clicked() {
+                        if ui
+                            .button("－")
+                            .on_hover_text("プレビュー縮小 (Ctrl+ホイール)")
+                            .clicked()
+                        {
                             self.zoom = (self.zoom - 0.15).clamp(0.5, 2.5);
                             self.revision += 1;
                             self.trigger_preview_update();
                         }
-                        ui.label(RichText::new("表示倍率:").weak());
                     });
                 });
             });
+
+        // ページ・基本書式設定GUIバー（フロントマターと双方向同期）
+        if self.show_page_settings_bar {
+            egui::Panel::top("page_settings_bar")
+                .exact_size(34.0)
+                .show(ui, |ui| {
+                    let mut doc_settings = parse_document(&self.markdown_text).settings;
+                    let mut changed = false;
+
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(RichText::new("⚙ 文書設定:").small().strong());
+
+                        // 用紙向き
+                        let is_portrait = doc_settings.orientation == Orientation::Portrait;
+                        if ui.selectable_label(is_portrait, "A4 縦").clicked() && !is_portrait {
+                            doc_settings.orientation = Orientation::Portrait;
+                            changed = true;
+                        }
+                        if ui.selectable_label(!is_portrait, "A4 横").clicked() && is_portrait {
+                            doc_settings.orientation = Orientation::Landscape;
+                            changed = true;
+                        }
+
+                        ui.separator();
+
+                        // フォント選択
+                        let is_gothic = doc_settings.font_choice == FontChoice::Gothic;
+                        if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic {
+                            doc_settings.font_choice = FontChoice::Gothic;
+                            changed = true;
+                        }
+                        if ui.selectable_label(!is_gothic, "明朝体").clicked() && is_gothic {
+                            doc_settings.font_choice = FontChoice::Mincho;
+                            changed = true;
+                        }
+
+                        ui.separator();
+
+                        // 余白選択
+                        ui.label(RichText::new("余白:").small());
+                        for (label, val) in [("狭 15mm", "15mm"), ("標準 20mm", "20mm"), ("広 25mm", "25mm")] {
+                            if ui
+                                .selectable_label(doc_settings.margin == val, label)
+                                .clicked()
+                                && doc_settings.margin != val
+                            {
+                                doc_settings.margin = val.to_string();
+                                changed = true;
+                            }
+                        }
+
+                        ui.separator();
+
+                        // 文字サイズ選択
+                        ui.label(RichText::new("文字:").small());
+                        for val in ["9.5pt", "10pt", "10.5pt", "11pt", "12pt"] {
+                            if ui
+                                .selectable_label(doc_settings.font_size == val, val)
+                                .clicked()
+                                && doc_settings.font_size != val
+                            {
+                                doc_settings.font_size = val.to_string();
+                                changed = true;
+                            }
+                        }
+
+                        ui.separator();
+
+                        // 基本行間スライダー
+                        ui.label(RichText::new("行間:").small());
+                        let mut lh = doc_settings.line_height;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut lh, 1.1..=2.2)
+                                    .step_by(0.1)
+                                    .fixed_decimals(1),
+                            )
+                            .changed()
+                        {
+                            doc_settings.line_height = lh;
+                            changed = true;
+                        }
+                    });
+
+                    if changed {
+                        self.push_undo_snapshot();
+                        self.markdown_text = update_document_settings_in_markdown(
+                            &self.markdown_text,
+                            &doc_settings,
+                        );
+                        self.is_dirty = true;
+                        self.revision += 1;
+                        self.pending_render = true;
+                        self.last_edit_time = Instant::now();
+                    }
+                });
+        }
 
         // 下部ステータスバー
         egui::Panel::bottom("bottom_status")
@@ -447,8 +980,15 @@ impl eframe::App for TyperApp {
 
                     let line_count = self.markdown_text.lines().count();
                     let char_count = self.markdown_text.chars().count();
+                    let (cur_line, cur_col) = self
+                        .cursor_char_range
+                        .map(|(c, _)| char_idx_to_line_col(&self.markdown_text, c))
+                        .unwrap_or((1, 1));
                     ui.label(
-                        RichText::new(format!("{line_count} 行 / {char_count} 文字")).small(),
+                        RichText::new(format!(
+                            "行 {cur_line}, 列 {cur_col}  ({line_count} 行 / {char_count} 文字)"
+                        ))
+                        .small(),
                     );
                     ui.separator();
 
@@ -495,7 +1035,6 @@ impl eframe::App for TyperApp {
                         });
                 }
 
-                // 生成Typstコード確認用折りたたみビュー
                 if self.show_typst_source {
                     egui::Panel::bottom("typst_source_inspector")
                         .resizable(true)
@@ -515,7 +1054,6 @@ impl eframe::App for TyperApp {
                         });
                 }
 
-                // プレビュー背景キャンバス
                 egui::Frame::NONE
                     .fill(Color32::from_rgb(228, 231, 235))
                     .inner_margin(16.0)
@@ -532,7 +1070,6 @@ impl eframe::App for TyperApp {
                                     {
                                         let display_size = *base_size * self.zoom * 0.85;
 
-                                        // 用紙のドロップシャドウと枠線を描画
                                         let (rect, _) =
                                             ui.allocate_exact_size(display_size, Sense::hover());
                                         let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
@@ -572,65 +1109,171 @@ impl eframe::App for TyperApp {
                     });
             });
 
-        // 中央（左ペイン）：マークアップエディタ＆クイック挿入バー
+        // 中央（左ペイン）：マークアップエディタ＆クイック挿入バー＆検索置換バー
         egui::CentralPanel::default().show(ui, |ui| {
-            // 拡張構文クイック挿入バー
+            // 書式・要素クイック挿入バー（カーソル位置への挿入・選択テキストのラップに対応）
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
-                ui.label(RichText::new("拡張書式挿入:").small().weak());
+                ui.label(RichText::new("書式挿入:").small().weak());
+
+                if ui
+                    .small_button("B 太字")
+                    .on_hover_text("選択範囲を太字で囲みます (Ctrl+B)")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("**", "太字", "**");
+                }
+                if ui
+                    .small_button("I 斜体")
+                    .on_hover_text("選択範囲を斜体で囲みます (Ctrl+I)")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("*", "斜体", "*");
+                }
+                if ui
+                    .small_button("🔴 赤文字")
+                    .on_hover_text("選択範囲（または新規テキスト）を赤文字にします")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "重要事項", "]{red}");
+                }
+                if ui
+                    .small_button("🔵 青文字")
+                    .on_hover_text("選択範囲（または新規テキスト）を青文字にします")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "補足事項", "]{blue}");
+                }
+                if ui
+                    .small_button("🟢 緑文字")
+                    .on_hover_text("選択範囲（または新規テキスト）を緑文字にします")
+                    .clicked()
+                {
+                    self.wrap_selection_or_insert("[", "正常", "]{green}");
+                }
+
+                ui.separator();
 
                 if ui
                     .small_button("📊 列幅付き表")
-                    .on_hover_text("列幅比率を指定した表テンプレートを末尾に挿入します")
+                    .on_hover_text("カーソル位置に列幅指定付きの表を挿入します")
                     .clicked()
                 {
-                    self.insert_snippet(
+                    self.insert_at_cursor(
                         "\n{widths: 25%, 50%, 25%}\n| 項目 | 内容 | 備考 |\n| :--- | :--- | :--- |\n| サンプル | 内容を入力 | 備考 |\n",
                     );
                 }
                 if ui
                     .small_button("➡ 右寄せ段落")
-                    .on_hover_text("日付や署名向けの右寄せ属性を挿入します")
+                    .on_hover_text("カーソル位置に日付・署名向けの右寄せ属性を挿入します")
                     .clicked()
                 {
-                    self.insert_snippet("\n{align: right}\n2026年10月16日\n");
+                    self.insert_at_cursor("\n{align: right}\n2026年10月16日\n");
                 }
                 if ui
                     .small_button("↔ 中央タイトル")
-                    .on_hover_text("中央寄せ＋文字サイズ指定の属性を挿入します")
+                    .on_hover_text("カーソル位置に中央寄せ＋文字サイズ指定を挿入します")
                     .clicked()
                 {
-                    self.insert_snippet("\n{align: center, size: 15pt}\n**文書タイトル**\n");
+                    self.insert_at_cursor("\n{align: center, size: 15pt}\n**文書タイトル**\n");
                 }
                 if ui
                     .small_button("↕ 行間指定")
-                    .on_hover_text("段落の行間を調整する属性を挿入します")
+                    .on_hover_text("カーソル位置に段落の行間指定を挿入します")
                     .clicked()
                 {
-                    self.insert_snippet("\n{line-height: 1.2}\nここに行間を調整したい文章を入力します。\n");
+                    self.insert_at_cursor("\n{line-height: 1.2}\n");
                 }
                 if ui
-                    .small_button("🔴 赤文字")
-                    .on_hover_text("インライン赤文字記法を挿入します")
+                    .small_button("🖼 画像...")
+                    .on_hover_text("ローカル画像ファイルを選択してカーソル位置に挿入します（ドラッグ＆ドロップも可）")
                     .clicked()
                 {
-                    self.insert_snippet("[重要事項]{red}");
-                }
-                if ui
-                    .small_button("🔵 青文字")
-                    .on_hover_text("インライン青文字記法を挿入します")
-                    .clicked()
-                {
-                    self.insert_snippet("[補足事項]{blue}");
+                    self.action_insert_image_dialog();
                 }
                 if ui
                     .small_button("📄 改ページ")
-                    .on_hover_text("手動改ページ指定を挿入します")
+                    .on_hover_text("カーソル位置に手動改ページを挿入します")
                     .clicked()
                 {
-                    self.insert_snippet("\n:::pagebreak\n");
+                    self.insert_at_cursor("\n:::pagebreak\n");
                 }
             });
+
+            // 検索・置換バー
+            if self.show_find_replace {
+                ui.separator();
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(241, 243, 244))
+                    .inner_margin(6.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("🔍 検索:").small());
+                            let find_resp = ui.add(
+                                TextEdit::singleline(&mut self.find_query)
+                                    .desired_width(160.0)
+                                    .hint_text("検索語句..."),
+                            );
+                            let matches = self.find_matches();
+                            let match_count = matches.len();
+                            if find_resp.changed() {
+                                self.current_match_index = 0;
+                                if match_count > 0 {
+                                    self.select_find_match(0);
+                                }
+                            }
+
+                            ui.label(RichText::new(format!("{match_count} 件")).small().weak());
+
+                            if ui
+                                .add_enabled(match_count > 0, egui::Button::new("◀ 前へ").small())
+                                .clicked()
+                            {
+                                let prev = if self.current_match_index == 0 {
+                                    match_count.saturating_sub(1)
+                                } else {
+                                    self.current_match_index - 1
+                                };
+                                self.select_find_match(prev);
+                            }
+                            if ui
+                                .add_enabled(match_count > 0, egui::Button::new("次へ ▶").small())
+                                .clicked()
+                            {
+                                self.select_find_match(self.current_match_index + 1);
+                            }
+
+                            ui.separator();
+                            ui.label(RichText::new("置換:").small());
+                            ui.add(
+                                TextEdit::singleline(&mut self.replace_text)
+                                    .desired_width(150.0)
+                                    .hint_text("置換後の語句..."),
+                            );
+
+                            if ui
+                                .add_enabled(match_count > 0, egui::Button::new("置換").small())
+                                .clicked()
+                            {
+                                self.replace_current_match();
+                            }
+                            if ui
+                                .add_enabled(
+                                    match_count > 0,
+                                    egui::Button::new("すべて置換").small(),
+                                )
+                                .clicked()
+                            {
+                                self.replace_all_matches();
+                            }
+
+                            if ui.small_button("✖").on_hover_text("検索バーを閉じる").clicked() {
+                                self.show_find_replace = false;
+                            }
+                        });
+                    });
+            }
 
             ui.separator();
 
@@ -641,19 +1284,42 @@ impl eframe::App for TyperApp {
                 ui.fonts_mut(|f| f.layout_job(layout_job))
             };
 
+            let prev_snapshot = self.markdown_text.clone();
+
             egui::ScrollArea::vertical()
                 .id_salt("editor_scroll")
                 .show(ui, |ui| {
-                    let response = ui.add_sized(
-                        ui.available_size(),
-                        TextEdit::multiline(&mut self.markdown_text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .lock_focus(true)
-                            .layouter(&mut layouter),
-                    );
+                    let mut output = TextEdit::multiline(&mut self.markdown_text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .min_size(ui.available_size())
+                        .lock_focus(true)
+                        .layouter(&mut layouter)
+                        .show(ui);
 
-                    if response.changed() {
+                    // 挿入・検索ジャンプ後のカーソル位置反映
+                    if let Some((start_c, end_c)) = self.pending_cursor_selection.take() {
+                        let range = CCursorRange::two(CCursor::new(start_c), CCursor::new(end_c));
+                        output.state.cursor.set_char_range(Some(range));
+                        output.state.store(ui.ctx(), output.response.id);
+                        output.response.request_focus();
+                    }
+
+                    // 現在のカーソル・選択位置を記録
+                    if let Some(range) = output.cursor_range {
+                        let sorted = range.as_sorted_char_range();
+                        self.cursor_char_range = Some((sorted.start.into(), sorted.end.into()));
+                    }
+
+                    if output.response.changed() {
+                        if self.undo_stack.last().map(|s| s.as_str()) != Some(prev_snapshot.as_str())
+                        {
+                            if self.undo_stack.len() >= 100 {
+                                self.undo_stack.remove(0);
+                            }
+                            self.undo_stack.push(prev_snapshot);
+                            self.redo_stack.clear();
+                        }
                         self.is_dirty = true;
                         self.revision += 1;
                         self.pending_render = true;
@@ -662,6 +1328,38 @@ impl eframe::App for TyperApp {
                 });
         });
     }
+}
+
+/// 文字インデックス (`chars()` の順番) をUTF-8バイトオフセットに変換する
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte_i, _)| byte_i)
+        .unwrap_or(s.len())
+}
+
+/// UTF-8バイトオフセットを文字インデックスに変換する
+fn byte_to_char_idx(s: &str, byte_idx: usize) -> usize {
+    let clamped = byte_idx.min(s.len());
+    s[..clamped].chars().count()
+}
+
+/// 文字インデックスから 1始まりの `(行番号, 列番号)` を計算する
+fn char_idx_to_line_col(s: &str, char_idx: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in s.chars().enumerate() {
+        if i >= char_idx {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// 標準Markdownおよび独自拡張構文（`{widths: ...}`, `[...]{red}`, `:::pagebreak` 等）の
@@ -728,7 +1426,6 @@ fn highlight_custom_markdown(text: &str) -> LayoutJob {
         } else if trimmed.starts_with('{') && trimmed.ends_with('}') && !trimmed.contains('|') {
             job.append(line, 0.0, attr_fmt.clone());
         } else if trimmed.starts_with('|') {
-            // 表の行はパイプ記号とインライン属性を色分けする
             append_line_with_inline_highlights(
                 &mut job,
                 line,
@@ -853,5 +1550,15 @@ mod tests {
         assert_eq!(job.text, SAMPLE_DOCUMENT);
         assert!(!job.sections.is_empty());
     }
-}
 
+    #[test]
+    fn test_char_byte_conversion_and_line_col() {
+        let s = "あいう\nえお";
+        assert_eq!(char_to_byte_idx(s, 0), 0);
+        assert_eq!(char_to_byte_idx(s, 1), 3);
+        assert_eq!(byte_to_char_idx(s, 3), 1);
+        assert_eq!(char_idx_to_line_col(s, 0), (1, 1));
+        assert_eq!(char_idx_to_line_col(s, 2), (1, 3));
+        assert_eq!(char_idx_to_line_col(s, 4), (2, 1));
+    }
+}

@@ -1,22 +1,44 @@
 //! Typst インメモリ組版エンジン・プレビュー描画・PDF出力モジュール
 //!
 //! 外部CLIプロセスを起動せず、Rustプロセス内で直接Typstエンジンを実行する。
-//! Windowsの日本語システムフォントを起動時に一度だけ読み込み、`Source::replace` による
-//! 差分更新と `comemo` のキャッシュ機構を活用して高速なプレビューとPDF出力を実現する。
+//! Windowsの日本語システムフォントをプロセス起動時に一度だけ読み込んで共有キャッシュ（`OnceLock`）し、
+//! `Source::replace` による差分更新と `comemo` のキャッシュ機構を活用して高速なプレビューとPDF出力を実現する。
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Scalar};
 use typst::{Library, LibraryExt, World};
-use typst::syntax::{FileId, Source};
 use typst_layout::PagedDocument;
 use typst_pdf::PdfOptions;
 use typst_render::RenderOptions;
+
+use crate::typst_gen::decode_local_image_vpath;
+
+struct SharedTypstResources {
+    library: Arc<LazyHash<Library>>,
+    book: Arc<LazyHash<FontBook>>,
+    fonts: Arc<Vec<Font>>,
+}
+
+static SHARED_RESOURCES: OnceLock<SharedTypstResources> = OnceLock::new();
+
+fn get_shared_resources() -> &'static SharedTypstResources {
+    SHARED_RESOURCES.get_or_init(|| {
+        let fonts = load_windows_japanese_fonts();
+        let book = FontBook::from_fonts(&fonts);
+        SharedTypstResources {
+            library: Arc::new(LazyHash::new(Library::default())),
+            book: Arc::new(LazyHash::new(book)),
+            fonts: Arc::new(fonts),
+        }
+    })
+}
 
 pub struct RenderedPage {
     pub width: u32,
@@ -39,15 +61,13 @@ pub struct TypstEngine {
 }
 
 impl TypstEngine {
-    /// Windowsのシステムフォントを読み込んでエンジンを初期化する
+    /// 共有フォントキャッシュを利用してエンジンを即座に初期化する
     pub fn new() -> Self {
-        let fonts = load_windows_japanese_fonts();
-        let book = FontBook::from_fonts(&fonts);
-
+        let shared = get_shared_resources();
         Self {
-            library: Arc::new(LazyHash::new(Library::default())),
-            book: Arc::new(LazyHash::new(book)),
-            fonts: Arc::new(fonts),
+            library: Arc::clone(&shared.library),
+            book: Arc::clone(&shared.book),
+            fonts: Arc::clone(&shared.fonts),
             main_source: Source::detached(String::new()),
         }
     }
@@ -137,12 +157,17 @@ impl World for TypstEngine {
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         if id == self.main_source.id() {
-            Ok(Bytes::from_string(self.main_source.text().to_owned()))
-        } else {
-            Err(FileError::NotFound(
-                Path::new(id.vpath().get_without_slash()).into(),
-            ))
+            return Ok(Bytes::from_string(self.main_source.text().to_owned()));
         }
+
+        let vpath_str = id.vpath().get_without_slash();
+        if let Some(real_path) = decode_local_image_vpath(vpath_str) {
+            let bytes = std::fs::read(&real_path)
+                .map_err(|e| FileError::from_io(e, &real_path))?;
+            return Ok(Bytes::new(bytes));
+        }
+
+        Err(FileError::NotFound(Path::new(vpath_str).into()))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -232,4 +257,3 @@ mod tests {
         assert!(html.contains("<colgroup>"));
     }
 }
-

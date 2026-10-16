@@ -1,14 +1,22 @@
 //! 内部文書モデル (`Document`) から Typst マークアップ文字列への変換器
 //!
 //! 日本語の社内報告書・業務文書に適した組版ルール（フォント、余白、見出し直後の改ページ抑制、
-//! 表の列幅・ヘッダ背景色・セル折り返しなど）を適用したTypstコードを生成する。
+//! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
     Alignment, Block, BlockAttributes, Document, FontChoice, Inline, Orientation,
 };
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 
+pub const LOCAL_IMAGE_VPATH_PREFIX: &str = "__local_img__/";
+
+#[cfg(test)]
 pub fn generate_typst_source(doc: &Document) -> String {
+    generate_typst_source_with_base(doc, None)
+}
+
+pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) -> String {
     let mut out = String::with_capacity(4096);
 
     let s = &doc.settings;
@@ -81,13 +89,13 @@ pub fn generate_typst_source(doc: &Document) -> String {
     );
 
     for block in &doc.blocks {
-        render_block(&mut out, block);
+        render_block(&mut out, block, base_dir);
     }
 
     out
 }
 
-fn render_block(out: &mut String, block: &Block) {
+fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
     match block {
         Block::Heading {
             level,
@@ -97,13 +105,13 @@ fn render_block(out: &mut String, block: &Block) {
             let prefix = "=".repeat((*level as usize).clamp(1, 6));
             let mut inner = String::new();
             let _ = write!(inner, "{prefix} ");
-            render_inlines(&mut inner, content);
+            render_inlines(&mut inner, content, base_dir);
             wrap_with_block_attrs(out, &inner, attrs);
             out.push_str("\n\n");
         }
         Block::Paragraph { content, attrs } => {
             let mut inner = String::new();
-            render_inlines(&mut inner, content);
+            render_inlines(&mut inner, content, base_dir);
             wrap_with_block_attrs(out, &inner, attrs);
             out.push_str("\n\n");
         }
@@ -120,7 +128,7 @@ fn render_block(out: &mut String, block: &Block) {
                 } else {
                     inner.push_str("- ");
                 }
-                render_inlines(&mut inner, item);
+                render_inlines(&mut inner, item, base_dir);
                 inner.push('\n');
             }
             wrap_with_block_attrs(out, inner.trim_end(), attrs);
@@ -132,7 +140,7 @@ fn render_block(out: &mut String, block: &Block) {
             rows,
             attrs,
         } => {
-            render_table(out, headers, alignments, rows, attrs);
+            render_table(out, headers, alignments, rows, attrs, base_dir);
             out.push_str("\n\n");
         }
         Block::BlockQuote {
@@ -141,7 +149,7 @@ fn render_block(out: &mut String, block: &Block) {
         } => {
             let mut inner = String::new();
             for b in sub_blocks {
-                render_block(&mut inner, b);
+                render_block(&mut inner, b, base_dir);
             }
             let quote_code = format!(
                 "#block(width: 100%, fill: rgb(\"#f8f9fa\"), stroke: (left: 3pt + rgb(\"#80868b\")), inset: (x: 10pt, y: 8pt))[{}]",
@@ -150,7 +158,11 @@ fn render_block(out: &mut String, block: &Block) {
             wrap_with_block_attrs(out, &quote_code, attrs);
             out.push_str("\n\n");
         }
-        Block::CodeBlock { lang: _, code, attrs } => {
+        Block::CodeBlock {
+            lang: _,
+            code,
+            attrs,
+        } => {
             let escaped = code.replace("```", "` ` `");
             let raw_block = format!(
                 "#block(width: 100%, fill: rgb(\"#f1f3f4\"), inset: 8pt, radius: 3pt)[\n```{}\n```]",
@@ -174,13 +186,13 @@ fn render_table(
     alignments: &[Option<Alignment>],
     rows: &[Vec<Vec<Inline>>],
     attrs: &BlockAttributes,
+    base_dir: Option<&Path>,
 ) {
     let col_count = headers
         .len()
         .max(rows.first().map(|r| r.len()).unwrap_or(1))
         .max(1);
 
-    // 列幅指定の組み立て
     let columns_spec = if let Some(widths) = &attrs.widths {
         let mut specs = Vec::with_capacity(col_count);
         for i in 0..col_count {
@@ -192,7 +204,6 @@ fn render_table(
         format!("{}", col_count)
     };
 
-    // 列ごとの文字揃え指定
     let align_spec = if alignments.iter().any(|a| a.is_some()) {
         let mut aligns = Vec::with_capacity(col_count);
         for i in 0..col_count {
@@ -220,7 +231,7 @@ fn render_table(
         table_code.push_str("  table.header(");
         for cell in headers.iter().take(col_count) {
             table_code.push_str("[*");
-            render_inlines(&mut table_code, cell);
+            render_inlines(&mut table_code, cell, base_dir);
             table_code.push_str("*], ");
         }
         for _ in headers.len()..col_count {
@@ -233,7 +244,7 @@ fn render_table(
         table_code.push_str("  ");
         for cell in row.iter().take(col_count) {
             table_code.push('[');
-            render_inlines(&mut table_code, cell);
+            render_inlines(&mut table_code, cell, base_dir);
             table_code.push_str("], ");
         }
         for _ in row.len()..col_count {
@@ -276,7 +287,7 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
     out.push_str(&current);
 }
 
-fn render_inlines(out: &mut String, inlines: &[Inline]) {
+fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>) {
     for inline in inlines {
         match inline {
             Inline::Text(t) => {
@@ -284,17 +295,17 @@ fn render_inlines(out: &mut String, inlines: &[Inline]) {
             }
             Inline::Strong(children) => {
                 out.push_str("#strong[");
-                render_inlines(out, children);
+                render_inlines(out, children, base_dir);
                 out.push(']');
             }
             Inline::Emphasis(children) => {
                 out.push_str("#emph[");
-                render_inlines(out, children);
+                render_inlines(out, children, base_dir);
                 out.push(']');
             }
             Inline::Strikethrough(children) => {
                 out.push_str("#strike[");
-                render_inlines(out, children);
+                render_inlines(out, children, base_dir);
                 out.push(']');
             }
             Inline::Code(code) => {
@@ -306,7 +317,7 @@ fn render_inlines(out: &mut String, inlines: &[Inline]) {
             }
             Inline::Styled { content, style } => {
                 let mut inner = String::new();
-                render_inlines(&mut inner, content);
+                render_inlines(&mut inner, content, base_dir);
 
                 let mut params = Vec::new();
                 if let Some(color) = &style.color {
@@ -331,8 +342,11 @@ fn render_inlines(out: &mut String, inlines: &[Inline]) {
             Inline::Link { text, url } => {
                 let safe_url = url.replace('\\', "\\\\").replace('"', "\\\"");
                 out.push_str(&format!("#link(\"{safe_url}\")["));
-                render_inlines(out, text);
+                render_inlines(out, text, base_dir);
                 out.push(']');
+            }
+            Inline::Image { alt, url } => {
+                render_image_inline(out, alt, url, base_dir);
             }
             Inline::SoftBreak => {
                 out.push(' ');
@@ -342,6 +356,96 @@ fn render_inlines(out: &mut String, inlines: &[Inline]) {
             }
         }
     }
+}
+
+fn render_image_inline(out: &mut String, alt: &str, url: &str, base_dir: Option<&Path>) {
+    if let Some(resolved) = resolve_local_image_path(url, base_dir) {
+        let vpath = encode_local_image_vpath(&resolved);
+        if alt.trim().is_empty() {
+            let _ = write!(out, "#image(\"/{vpath}\", width: 80%, fit: \"contain\")");
+        } else {
+            let mut escaped_alt = String::new();
+            escape_typst_text(&mut escaped_alt, alt.trim());
+            let _ = write!(
+                out,
+                "#figure(image(\"/{vpath}\", width: 80%, fit: \"contain\"), caption: [{escaped_alt}])"
+            );
+        }
+    } else {
+        // 画像パスをまだ入力途中・または該当ファイルが存在しない場合でもエラー停止せずプレースホルダ枠を表示する
+        let mut escaped_url = String::new();
+        escape_typst_text(&mut escaped_url, url);
+        let mut escaped_alt = String::new();
+        escape_typst_text(&mut escaped_alt, alt);
+        let label = if escaped_alt.is_empty() {
+            escaped_url
+        } else {
+            format!("{escaped_alt} ({escaped_url})")
+        };
+        let _ = write!(
+            out,
+            "#block(width: 100%, fill: rgb(\"#f8f9fa\"), stroke: (paint: rgb(\"#9aa0a6\"), thickness: 0.7pt, dash: \"dashed\"), inset: 10pt, radius: 4pt)[#text(fill: rgb(\"#5f6368\"))[🖼 画像未検出: {label}]]"
+        );
+    }
+}
+
+pub fn resolve_local_image_path(url: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return None;
+    }
+
+    let candidate = Path::new(trimmed);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else if let Some(base) = base_dir {
+        base.join(candidate)
+    } else {
+        std::env::current_dir().ok()?.join(candidate)
+    };
+
+    if resolved.is_file() {
+        let ext = resolved
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
+/// Windowsのドライブレター (`C:\...`) や日本語パスを含むファイルパスを
+/// Typstの仮想パスとして安全に扱える16進数エンコード文字列に変換する
+pub fn encode_local_image_vpath(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let path_str = path.to_string_lossy();
+    let mut hex = String::with_capacity(path_str.len() * 2);
+    for b in path_str.as_bytes() {
+        let _ = write!(hex, "{b:02x}");
+    }
+    format!("{LOCAL_IMAGE_VPATH_PREFIX}{hex}.{ext}")
+}
+
+pub fn decode_local_image_vpath(vpath_without_slash: &str) -> Option<PathBuf> {
+    let rest = vpath_without_slash.strip_prefix(LOCAL_IMAGE_VPATH_PREFIX)?;
+    let (hex_part, _ext) = rest.rsplit_once('.').unwrap_or((rest, ""));
+    if hex_part.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex_part.len() / 2);
+    for i in (0..hex_part.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex_part[i..i + 2], 16).ok()?;
+        bytes.push(byte);
+    }
+    let path_str = String::from_utf8(bytes).ok()?;
+    Some(PathBuf::from(path_str))
 }
 
 fn escape_typst_text(out: &mut String, text: &str) {
@@ -396,7 +500,6 @@ fn sanitize_column_width(raw: &str) -> String {
             }
         }
     }
-    // パーセント指定はTypstの比率指定 (fr) に変換すると余白を除いた表幅100%に対して綺麗に配分される
     if let Some(num_part) = trimmed.strip_suffix('%') {
         if let Ok(v) = num_part.trim().parse::<f32>() {
             if v > 0.0 {

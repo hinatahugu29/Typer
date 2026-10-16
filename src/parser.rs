@@ -137,6 +137,10 @@ pub fn parse_document(input: &str) -> Document {
                     let prev = std::mem::take(&mut current_inlines);
                     inline_stack.push((InlineContainer::Link(dest_url.to_string()), prev));
                 }
+                Tag::Image { dest_url, .. } => {
+                    let prev = std::mem::take(&mut current_inlines);
+                    inline_stack.push((InlineContainer::Image(dest_url.to_string()), prev));
+                }
                 _ => {}
             },
             Event::End(tag_end) => match tag_end {
@@ -246,7 +250,11 @@ pub fn parse_document(input: &str) -> Document {
                         push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
                     }
                 }
-                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Strong
+                | TagEnd::Emphasis
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image => {
                     if let Some((container, mut parent_inlines)) = inline_stack.pop() {
                         let inner = expand_custom_inlines(std::mem::take(&mut current_inlines));
                         let wrapped = match container {
@@ -254,6 +262,10 @@ pub fn parse_document(input: &str) -> Document {
                             InlineContainer::Emphasis => Inline::Emphasis(inner),
                             InlineContainer::Strikethrough => Inline::Strikethrough(inner),
                             InlineContainer::Link(url) => Inline::Link { text: inner, url },
+                            InlineContainer::Image(url) => {
+                                let alt = inlines_to_plain_text(&inner);
+                                Inline::Image { alt, url }
+                            }
                         };
                         parent_inlines.push(wrapped);
                         current_inlines = parent_inlines;
@@ -295,11 +307,49 @@ pub fn parse_document(input: &str) -> Document {
     Document { settings, blocks }
 }
 
+/// GUIの設定バーで変更された `DocumentSettings` を原稿先頭のフロントマターに反映した文字列を返す
+pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSettings) -> String {
+    let (_, body) = extract_frontmatter(input);
+    let orient = match settings.orientation {
+        Orientation::Portrait => "portrait",
+        Orientation::Landscape => "landscape",
+    };
+    let font = match settings.font_choice {
+        FontChoice::Gothic => "gothic",
+        FontChoice::Mincho => "mincho",
+    };
+    let paper = settings.paper.to_ascii_uppercase();
+    let trimmed_body = body.trim_start_matches(['\r', '\n']);
+
+    format!(
+        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\n---\n\n{}",
+        paper, orient, settings.margin, settings.font_size, settings.line_height, font, trimmed_body
+    )
+}
+
+fn inlines_to_plain_text(inlines: &[Inline]) -> String {
+    let mut s = String::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) | Inline::Code(t) => s.push_str(t),
+            Inline::Strong(c)
+            | Inline::Emphasis(c)
+            | Inline::Strikethrough(c)
+            | Inline::Styled { content: c, .. }
+            | Inline::Link { text: c, .. } => s.push_str(&inlines_to_plain_text(c)),
+            Inline::Image { alt, .. } => s.push_str(alt),
+            Inline::SoftBreak | Inline::HardBreak => s.push(' '),
+        }
+    }
+    s
+}
+
 enum InlineContainer {
     Strong,
     Emphasis,
     Strikethrough,
     Link(String),
+    Image(String),
 }
 
 struct TableState {
