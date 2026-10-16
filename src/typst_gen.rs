@@ -116,19 +116,31 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         }
         Block::List {
             ordered,
-            start: _,
+            start,
             items,
             attrs,
         } => {
             let mut inner = String::new();
-            for item in items {
-                if *ordered {
-                    inner.push_str("+ ");
-                } else {
-                    inner.push_str("- ");
+            if *ordered && *start != 1 {
+                // 既定（1始まり）以外の番号付きリストは、`+` 記法では開始番号を指定できないため
+                // `#enum(start: ...)` 関数形式で明示的に組み立てる
+                let _ = write!(inner, "#enum(start: {start})[\n");
+                for item in items {
+                    inner.push_str("  [");
+                    render_inlines(&mut inner, item, base_dir);
+                    inner.push_str("]\n");
                 }
-                render_inlines(&mut inner, item, base_dir);
-                inner.push('\n');
+                inner.push(']');
+            } else {
+                for item in items {
+                    if *ordered {
+                        inner.push_str("+ ");
+                    } else {
+                        inner.push_str("- ");
+                    }
+                    render_inlines(&mut inner, item, base_dir);
+                    inner.push('\n');
+                }
             }
             wrap_with_block_attrs(out, inner.trim_end(), attrs);
             out.push_str("\n\n");
@@ -742,5 +754,23 @@ mod tests {
         let doc = parse_document("```typst\n#line(length: 50%, stroke: 1pt)\n```\n");
         let code = generate_typst_source(&doc);
         assert!(code.contains("#line(length: 50%, stroke: 1pt)"));
+    }
+
+    #[test]
+    fn test_ordered_list_default_start_uses_plain_enum_shorthand() {
+        let doc = parse_document("1. 一番目\n2. 二番目\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("+ 一番目"));
+        assert!(code.contains("+ 二番目"));
+        assert!(!code.contains("#enum(start:"));
+    }
+
+    #[test]
+    fn test_ordered_list_custom_start_uses_enum_function_form() {
+        let doc = parse_document("5. 五番目\n6. 六番目\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#enum(start: 5)"));
+        assert!(code.contains("[五番目]"));
+        assert!(code.contains("[六番目]"));
     }
 }
