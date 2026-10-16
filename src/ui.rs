@@ -119,6 +119,8 @@ pub struct TyperApp {
     custom_color_hex: String,
     /// 直近にエクスポートしたファイルのパス（「開く」ボタン用）
     last_export_path: Option<PathBuf>,
+    /// ダークモード表示が有効か（永続化される）
+    dark_mode: bool,
 }
 
 impl TyperApp {
@@ -132,8 +134,9 @@ impl TyperApp {
         cc.egui_ctx
             .send_viewport_cmd(ViewportCommand::RequestPaintWhileHidden);
 
+        let dark_mode = load_dark_mode_setting();
         setup_japanese_fonts(&cc.egui_ctx);
-        setup_visual_theme(&cc.egui_ctx);
+        setup_visual_theme(&cc.egui_ctx, dark_mode);
 
         let (req_tx, req_rx) = mpsc::channel::<WorkerRequest>();
         let (res_tx, res_rx) = mpsc::channel::<WorkerResponse>();
@@ -211,6 +214,7 @@ impl TyperApp {
             show_outline_panel: false,
             custom_color_hex: String::new(),
             last_export_path: None,
+            dark_mode,
         };
 
         app.trigger_preview_update();
@@ -464,6 +468,12 @@ impl TyperApp {
                 }
             }
         }
+    }
+
+    fn toggle_dark_mode(&mut self, ctx: &egui::Context) {
+        self.dark_mode = !self.dark_mode;
+        setup_visual_theme(ctx, self.dark_mode);
+        save_dark_mode_setting(self.dark_mode);
     }
 
     fn action_export_html(&mut self) {
@@ -802,6 +812,9 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::U)) {
             self.wrap_selection_or_insert("[", "下線テキスト", "]{underline}");
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::ALT, Key::D)) {
+            self.toggle_dark_mode(&ctx);
+        }
 
         // 改行(<br>)挿入：Shift+Enter で段落・表セル内の強制改行を挿入する
         if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Enter)) {
@@ -1065,6 +1078,15 @@ impl eframe::App for TyperApp {
                     ui.separator();
                     ui.checkbox(&mut self.show_typst_source, "Typstコード")
                         .on_hover_text("生成されたTypstコードを表示します (Ctrl+Alt+Y)");
+
+                    let dark_mode_label = if self.dark_mode { "☀ ライト" } else { "🌙 ダーク" };
+                    if ui
+                        .selectable_label(self.dark_mode, dark_mode_label)
+                        .on_hover_text("ダークモード / ライトモードを切り替えます (Ctrl+Alt+D)")
+                        .clicked()
+                    {
+                        self.toggle_dark_mode(&ui.ctx().clone());
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("100%").on_hover_text("表示倍率を100%に戻す (Ctrl+0)").clicked() {
@@ -2003,11 +2025,47 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn setup_visual_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = Color32::from_rgb(248, 249, 250);
-    visuals.extreme_bg_color = Color32::WHITE;
+fn setup_visual_theme(ctx: &egui::Context, dark_mode: bool) {
+    let mut visuals = if dark_mode {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    if dark_mode {
+        visuals.panel_fill = Color32::from_rgb(30, 31, 34);
+        visuals.extreme_bg_color = Color32::from_rgb(18, 19, 21);
+    } else {
+        visuals.panel_fill = Color32::from_rgb(248, 249, 250);
+        visuals.extreme_bg_color = Color32::WHITE;
+    }
     ctx.set_visuals(visuals);
+}
+
+/// ダークモード設定の永続化ファイルのパス（最近使ったファイル一覧と同じ設定フォルダ）
+fn dark_mode_store_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("Typer").join("dark_mode.txt"))
+}
+
+/// 保存されているダークモード設定を読み込む（未設定時は既定でライトモード）
+fn load_dark_mode_setting() -> bool {
+    let Some(path) = dark_mode_store_path() else {
+        return false;
+    };
+    std::fs::read_to_string(&path)
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// ダークモード設定をテキストファイルへ保存する（失敗しても致命的ではないため無視する）
+fn save_dark_mode_setting(enabled: bool) {
+    let Some(path) = dark_mode_store_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, if enabled { "1" } else { "0" });
 }
 
 #[cfg(test)]
@@ -2074,6 +2132,7 @@ mod tests {
             show_outline_panel: false,
             custom_color_hex: String::new(),
             last_export_path: None,
+            dark_mode: false,
         }
     }
 
