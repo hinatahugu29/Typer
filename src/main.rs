@@ -16,12 +16,16 @@ use eframe::egui;
 use ui::TyperApp;
 
 fn main() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+        .expect("assets/icon.png は有効なPNGであるはず（ビルド時に同梱）");
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Typer — 軽量マークアップ報告書作成アプリ (MVP)")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 520.0])
-            .with_visible(true),
+            .with_visible(true)
+            .with_icon(icon),
         ..Default::default()
     };
 

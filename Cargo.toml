@@ -20,6 +20,10 @@ zip = { version = "9.0", default-features = false, features = ["deflate-flate2"]
 
 [dev-dependencies]
 roxmltree = "0.21.1"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
 
 [profile.release]
 opt-level = 3

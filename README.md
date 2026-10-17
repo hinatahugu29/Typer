@@ -181,6 +181,12 @@ page-number: off        # 省略可。PDFのページ番号表示をOFFにする
 ```text
 Typer/
 ├── Cargo.toml
+├── build.rs              # Windows向けビルド時にexeへicon.icoを埋め込む
+├── assets/
+│   ├── icon.png          # アプリアイコン原本（実行時ウィンドウ/タスクバーアイコンに使用）
+│   └── icon.ico          # icon.pngから生成したマルチサイズico（exeに埋め込み）
+├── examples/
+│   └── gen_icon.rs       # icon.png → icon.ico 生成ツール（差し替え時: cargo run --example gen_icon）
 ├── docs/
 │   ├── requirements.md   # 要件定義書 (v0.2)
 │   └── roadmap.md        # 開発ロードマップ・マイルストーン
