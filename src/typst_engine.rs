@@ -327,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn test_page_number_off_compiles_and_renders() {
+        // page-number: off / footer併用時の両方が、Typstコンパイル・プレビュー描画・
+        // PDF出力までエラーなく通ることを確認する
+        for src in [
+            "---\npage-number: off\n---\n\n# 見出し\n\n本文です。\n",
+            "---\npage-number: off\nfooter: 社外秘\n---\n\n# 見出し\n\n本文です。\n",
+        ] {
+            let doc = parse_document(src);
+            let typst_code = generate_typst_source(&doc);
+
+            let mut engine = TypstEngine::new();
+            let preview = engine
+                .render_preview(&typst_code, 1.5)
+                .expect("page-number: off document should render without error");
+            assert!(!preview.pages.is_empty());
+
+            let pdf_bytes = engine
+                .export_pdf(&typst_code)
+                .expect("page-number: off document should export to PDF without error");
+            assert!(pdf_bytes.starts_with(b"%PDF-"));
+        }
+    }
+
+    #[test]
     fn test_header_and_footer_text_compiles_and_renders() {
         // フロントマターの header:/footer: 指定が実際にTypstコンパイル・プレビュー描画・
         // PDF出力までエラーなく通ることを確認する（footerはページ番号表示と併記される）

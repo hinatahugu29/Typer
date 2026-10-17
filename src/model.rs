@@ -50,6 +50,8 @@ pub struct DocumentSettings {
     pub header_text: Option<String>,
     /// 全ページ共通のフッター文字列（「社外秘」等の表記。未指定時は非表示）
     pub footer_text: Option<String>,
+    /// ページ番号を表示するか（既定: 表示する）
+    pub show_page_number: bool,
 }
 
 impl Default for DocumentSettings {
@@ -64,6 +66,7 @@ impl Default for DocumentSettings {
             accent_color: "#1a73e8".to_string(),
             header_text: None,
             footer_text: None,
+            show_page_number: true,
         }
     }
 }

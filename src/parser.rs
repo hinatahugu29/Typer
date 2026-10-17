@@ -380,6 +380,9 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     if let Some(footer) = &settings.footer_text {
         let _ = writeln!(frontmatter, "footer: {footer}");
     }
+    if !settings.show_page_number {
+        frontmatter.push_str("page-number: off\n");
+    }
     frontmatter.push_str("---\n\n");
     frontmatter.push_str(trimmed_body);
     frontmatter
@@ -564,6 +567,11 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     if !val.is_empty() {
                         settings.footer_text = Some(val.to_string());
                     }
+                }
+                "page-number" | "page-numbering" | "numbering" => {
+                    let v_low = val.to_ascii_lowercase();
+                    settings.show_page_number =
+                        !matches!(v_low.as_str(), "off" | "false" | "no" | "none" | "0");
                 }
                 _ => {}
             }
@@ -1115,6 +1123,39 @@ line-height: 1.4
             update_document_settings_in_markdown("本文のみ\n", &doc_without.settings);
         assert!(!regenerated_without.contains("header:"));
         assert!(!regenerated_without.contains("footer:"));
+    }
+
+    #[test]
+    fn test_page_number_defaults_to_shown() {
+        let doc = parse_document("本文\n");
+        assert!(doc.settings.show_page_number);
+    }
+
+    #[test]
+    fn test_page_number_off_variants_all_recognized() {
+        for variant in ["off", "false", "no", "none", "0", "OFF"] {
+            let src = format!("---\npage-number: {variant}\n---\n\n本文\n");
+            let doc = parse_document(&src);
+            assert!(
+                !doc.settings.show_page_number,
+                "page-number: {variant} should disable page numbers"
+            );
+        }
+    }
+
+    #[test]
+    fn test_page_number_off_roundtrip_through_regeneration() {
+        let src = "---\npage-number: off\n---\n\n本文\n";
+        let doc = parse_document(src);
+        assert!(!doc.settings.show_page_number);
+
+        let regenerated = update_document_settings_in_markdown(src, &doc.settings);
+        assert!(regenerated.contains("page-number: off"));
+
+        // 既定（表示する）の場合はpage-number行自体が出ない
+        let doc_on = parse_document("本文のみ\n");
+        let regenerated_on = update_document_settings_in_markdown("本文のみ\n", &doc_on.settings);
+        assert!(!regenerated_on.contains("page-number"));
     }
 
     #[test]

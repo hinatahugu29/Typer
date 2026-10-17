@@ -1419,6 +1419,19 @@ impl eframe::App for TyperApp {
                                 changed = true;
                             }
                         }
+
+                        ui.separator();
+
+                        // ページ番号表示のON/OFF
+                        if ui
+                            .checkbox(&mut doc_settings.show_page_number, "ページ番号")
+                            .on_hover_text(
+                                "PDF出力時の各ページ下部のページ番号表示を切り替えます（フロントマターの page-number と連動）",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
                     });
 
                     if changed {
