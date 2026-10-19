@@ -795,6 +795,9 @@ fn is_standalone_block_attr_line(trimmed: &str) -> bool {
                 | "c"
                 | "header-bg"
                 | "block-width"
+                | "indent"
+                | "indent-left"
+                | "indent-right"
         )
     } else {
         false
@@ -859,6 +862,21 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
                 "block-width" => {
                     if !val.is_empty() {
                         attrs.block_width = Some(val.to_string());
+                    }
+                }
+                "indent" => {
+                    if !val.is_empty() {
+                        attrs.indent_left = Some(val.to_string());
+                    }
+                }
+                "indent-left" => {
+                    if !val.is_empty() {
+                        attrs.indent_left = Some(val.to_string());
+                    }
+                }
+                "indent-right" => {
+                    if !val.is_empty() {
+                        attrs.indent_right = Some(val.to_string());
                     }
                 }
                 _ => {}

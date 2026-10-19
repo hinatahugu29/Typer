@@ -393,6 +393,12 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
         current = format!("#block(width: {safe_width})[{current}]");
     }
 
+    if attrs.indent_left.is_some() || attrs.indent_right.is_some() {
+        let safe_left = sanitize_length(attrs.indent_left.as_deref().unwrap_or("0pt"), "0pt");
+        let safe_right = sanitize_length(attrs.indent_right.as_deref().unwrap_or("0pt"), "0pt");
+        current = format!("#pad(left: {safe_left}, right: {safe_right})[{current}]");
+    }
+
     if let Some(align) = attrs.align {
         let align_kw = match align {
             Alignment::Left => "left",
@@ -806,6 +812,20 @@ mod tests {
         let code = generate_typst_source(&doc);
         assert!(code.contains("#block(width: 60%)"));
         assert!(code.contains("#align(center)"));
+    }
+
+    #[test]
+    fn test_indent_attribute_wraps_pad() {
+        let doc = parse_document("{indent: 20mm}\n段落\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#pad(left: 20mm, right: 0pt)"));
+    }
+
+    #[test]
+    fn test_indent_left_right_attributes_wrap_pad() {
+        let doc = parse_document("{indent-left: 10mm, indent-right: 5mm}\n段落\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains("#pad(left: 10mm, right: 5mm)"));
     }
 
     #[test]

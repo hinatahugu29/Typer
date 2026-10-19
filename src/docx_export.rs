@@ -63,6 +63,11 @@ fn length_to_twips(raw: &str, default_twips: i64) -> i64 {
             return (pt * 20.0).round() as i64;
         }
     }
+    if let Some(v) = trimmed.strip_suffix("em") {
+        if let Ok(em) = v.trim().parse::<f64>() {
+            return (em * 10.5 * 20.0).round() as i64; // 1em ≈ 本文既定サイズ10.5pt相当
+        }
+    }
     default_twips
 }
 
@@ -77,7 +82,11 @@ fn render_docx_body(blocks: &[Block]) -> String {
 
 fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize) {
     match block {
-        Block::Heading { level, content, .. } => {
+        Block::Heading {
+            level,
+            content,
+            attrs,
+        } => {
             let lvl = (*level).clamp(1, 6);
             let outline_lvl = lvl as u32 - 1;
             let sz = match lvl {
@@ -86,8 +95,9 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                 3 => 24,
                 _ => 22,
             };
+            let ind = indent_ind_attr(attrs);
             out.push_str(&format!(
-                "    <w:p><w:pPr><w:outlineLvl w:val=\"{outline_lvl}\"/><w:spacing w:before=\"240\" w:after=\"120\"/></w:pPr>"
+                "    <w:p><w:pPr><w:outlineLvl w:val=\"{outline_lvl}\"/><w:spacing w:before=\"240\" w:after=\"120\"/>{ind}</w:pPr>"
             ));
             render_docx_runs(
                 out,
@@ -101,8 +111,13 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
             out.push_str("</w:p>\n");
             *heading_index += 1;
         }
-        Block::Paragraph { content, .. } => {
-            out.push_str("    <w:p>");
+        Block::Paragraph { content, attrs } => {
+            let ind = indent_ind_attr(attrs);
+            if ind.is_empty() {
+                out.push_str("    <w:p>");
+            } else {
+                out.push_str(&format!("    <w:p><w:pPr>{ind}</w:pPr>"));
+            }
             render_docx_runs(out, content, RunStyle::default());
             out.push_str("</w:p>\n");
         }
@@ -225,6 +240,30 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
             }
         }
     }
+}
+
+/// `attrs` の `indent_left` / `indent_right` から `<w:ind .../>` 断片を生成する（指定がなければ空文字列）
+fn indent_ind_attr(attrs: &crate::model::BlockAttributes) -> String {
+    let left = attrs
+        .indent_left
+        .as_deref()
+        .map(|v| length_to_twips(v, 0));
+    let right = attrs
+        .indent_right
+        .as_deref()
+        .map(|v| length_to_twips(v, 0));
+    if left.is_none() && right.is_none() {
+        return String::new();
+    }
+    let mut s = String::from("<w:ind");
+    if let Some(l) = left {
+        s.push_str(&format!(" w:left=\"{l}\""));
+    }
+    if let Some(r) = right {
+        s.push_str(&format!(" w:right=\"{r}\""));
+    }
+    s.push_str("/>");
+    s
 }
 
 fn render_docx_table_cell(
@@ -487,6 +526,15 @@ mod tests {
         assert!(out.contains("<w:b/>"));
         assert!(out.contains("<w:i/>"));
         assert!(out.contains("<w:u w:val=\"single\"/>"));
+    }
+
+    #[test]
+    fn test_docx_indent_attributes_emit_ind_twips() {
+        let doc = parse_document("{indent-left: 10mm, indent-right: 5mm}\n段落\n");
+        let mut out = String::new();
+        let mut idx = 0usize;
+        render_docx_block(&mut out, &doc.blocks[0], &mut idx);
+        assert!(out.contains("<w:ind w:left=\"567\" w:right=\"283\"/>"));
     }
 
     #[test]

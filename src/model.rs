@@ -103,6 +103,10 @@ pub struct BlockAttributes {
     pub boxed: bool,
     /// ブロック単位の表示幅（表以外の見出し・段落・引用などに使用。例: "60%", "100mm"）
     pub block_width: Option<String>,
+    /// ブロック単位の左インデント（段下げ。例: "20mm", "2em"）
+    pub indent_left: Option<String>,
+    /// ブロック単位の右インデント（例: "20mm", "2em"）
+    pub indent_right: Option<String>,
 }
 
 impl BlockAttributes {
@@ -115,6 +119,8 @@ impl BlockAttributes {
             && self.header_bg.is_none()
             && !self.boxed
             && self.block_width.is_none()
+            && self.indent_left.is_none()
+            && self.indent_right.is_none()
     }
 }
 

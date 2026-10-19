@@ -524,6 +524,12 @@ fn block_style_attr(attrs: &BlockAttributes) -> String {
             _ => {}
         }
     }
+    if let Some(indent_left) = &attrs.indent_left {
+        rules.push(format!("margin-left: {}", html_escape(indent_left)));
+    }
+    if let Some(indent_right) = &attrs.indent_right {
+        rules.push(format!("margin-right: {}", html_escape(indent_right)));
+    }
     if rules.is_empty() {
         String::new()
     } else {
@@ -818,6 +824,14 @@ mod tests {
         let html = generate_html(&doc);
         assert!(html.contains("width: 60%"));
         assert!(!html.contains("margin-left"));
+    }
+
+    #[test]
+    fn test_indent_attributes_emit_css_margins() {
+        let doc = parse_document("{indent-left: 10mm, indent-right: 5mm}\n段落\n");
+        let html = generate_html(&doc);
+        assert!(html.contains("margin-left: 10mm"));
+        assert!(html.contains("margin-right: 5mm"));
     }
 
     #[test]
