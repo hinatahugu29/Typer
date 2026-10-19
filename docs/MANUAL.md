@@ -110,6 +110,7 @@
 | `Ctrl + Alt + C` | 中央タイトルのサンプルを挿入 |
 | `Ctrl + Alt + W` | 段落の表示幅（`block-width`）指定を挿入 |
 | `Ctrl + Alt + L` | 段落の行間指定を挿入 |
+| `Ctrl + Alt + N` | 段落のインデント（`indent`）指定を挿入 |
 | `Ctrl + Alt + I` | 画像挿入ダイアログを開く |
 | `Ctrl + Alt + B` | 囲み枠ボックスのサンプルを挿入 |
 
@@ -207,6 +208,7 @@ watermark: 社外秘         # 省略可。本文背面に薄く表示する透�
 | ↔ 中央タイトル | `{align: center, size: ...}` のタイトルサンプル | `Ctrl+Alt+C` |
 | ⬌ 幅指定 | `{align: center, block-width: ...}` のサンプル（[9.5](#95-ブロック単位の表示幅)参照） | `Ctrl+Alt+W` |
 | ↕ 行間指定 | `{line-height: ...}` | `Ctrl+Alt+L` |
+| ⇥ インデント | `{indent: ...}`のサンプル（[9.6](#96-段落のインデント段下げ)参照） | `Ctrl+Alt+N` |
 | 🖼 画像... | ローカル画像ファイルを選択してカーソル位置に挿入（ドラッグ＆ドロップも可） | `Ctrl+Alt+I` |
 | 📄 改ページ | `:::pagebreak` | `Ctrl+Enter` |
 | ↕ 空白行 | `:::space 1em` | `Ctrl+Shift+Enter` |

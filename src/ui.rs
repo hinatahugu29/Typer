@@ -1038,6 +1038,9 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::L)) {
             self.insert_at_cursor("\n{line-height: 1.2}\n");
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::N)) {
+            self.insert_at_cursor("\n{indent: 20mm}\n");
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::I)) {
             self.action_insert_image_dialog();
         }
@@ -1874,6 +1877,13 @@ impl eframe::App for TyperApp {
                     .clicked()
                 {
                     self.insert_at_cursor("\n{line-height: 1.2}\n");
+                }
+                if ui
+                    .small_button("⇥ インデント")
+                    .on_hover_text("カーソル位置に段落の左インデント（段下げ）指定を挿入します。左右別指定は {indent-left: ..., indent-right: ...} を使用してください (Ctrl+Alt+N)")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n{indent: 20mm}\n");
                 }
                 if ui
                     .small_button("🖼 画像...")
