@@ -266,7 +266,11 @@ mod tests {
 
     #[test]
     fn test_end_to_end_sample_document_render_and_pdf() {
-        let doc = parse_document(SAMPLE_DOCUMENT);
+        let src = format!(
+            "{}\n\n{{widths: 30%, 70%}}\n| 項目 | 内容 |\n| :--- | :--- |\n| 発生日時 | 2026年10月14日 |\n",
+            SAMPLE_DOCUMENT
+        );
+        let doc = parse_document(&src);
         let typst_code = generate_typst_source(&doc);
         let mut engine = TypstEngine::new();
 

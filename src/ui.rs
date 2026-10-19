@@ -1044,6 +1044,11 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::B)) {
             self.insert_at_cursor("\n{box}\n> 注意事項などをここに記載します。\n");
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::M)) {
+            self.insert_at_cursor(
+                "\n:::columns 2\nここに段組みにしたい本文を記載します。\n:::columns-end\n\n",
+            );
+        }
 
         // タブ操作（Ctrl+Alt系のショートカットより後に置き、誤って奪わないようにする）
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
@@ -1431,6 +1436,52 @@ impl eframe::App for TyperApp {
                             .changed()
                         {
                             changed = true;
+                        }
+
+                        ui.separator();
+
+                        // 段組み選択（1〜3段）
+                        ui.label(RichText::new("段組み:").small());
+                        for (label, n) in [("1段", 1u8), ("2段", 2u8), ("3段", 3u8)] {
+                            if ui
+                                .selectable_label(doc_settings.columns == n, label)
+                                .clicked()
+                                && doc_settings.columns != n
+                            {
+                                doc_settings.columns = n;
+                                changed = true;
+                            }
+                        }
+
+                        ui.separator();
+
+                        // 透かし文字のON/OFF（フロントマターの watermark と連動）
+                        let mut watermark_on = doc_settings.watermark.is_some();
+                        if ui
+                            .checkbox(&mut watermark_on, "透かし")
+                            .on_hover_text(
+                                "本文背面に薄く表示する透かし文字（例: 社外秘・DRAFT）を切り替えます",
+                            )
+                            .changed()
+                        {
+                            doc_settings.watermark = if watermark_on {
+                                Some("社外秘".to_string())
+                            } else {
+                                None
+                            };
+                            changed = true;
+                        }
+                        if let Some(watermark) = doc_settings.watermark.as_mut() {
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(watermark)
+                                        .desired_width(70.0)
+                                        .hint_text("社外秘"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
                         }
                     });
 
@@ -1858,6 +1909,15 @@ impl eframe::App for TyperApp {
                     .clicked()
                 {
                     self.insert_at_cursor("\n:::toc\n\n");
+                }
+                if ui
+                    .small_button("📰 段組み")
+                    .on_hover_text("カーソル位置に、その範囲だけを段組み表示する :::columns 〜 :::columns-end を挿入します (Ctrl+Alt+M)")
+                    .clicked()
+                {
+                    self.insert_at_cursor(
+                        "\n:::columns 2\nここに段組みにしたい本文を記載します。\n:::columns-end\n\n",
+                    );
                 }
 
                 ui.separator();

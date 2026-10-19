@@ -218,6 +218,12 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                 "    <w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC \\o \"1-3\" \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t xml:space=\"preserve\">目次（Wordで右クリック→「フィールド更新」、またはF9キーで表示されます）</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>\n",
             );
         }
+        Block::Columns { blocks, .. } => {
+            // Word出力は段組みを再現できないため、範囲内のブロックを通常の縦積みとして展開する
+            for b in blocks {
+                render_docx_block(out, b, heading_index);
+            }
+        }
     }
 }
 

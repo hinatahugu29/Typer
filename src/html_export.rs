@@ -36,6 +36,15 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
         FontChoice::Mincho => r#""BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif"#,
     };
     let accent_color = sanitize_color_hex(&s.accent_color);
+    let columns_css = if s.columns > 1 {
+        format!(
+            "column-count: {}; column-gap: 2.5rem;",
+            s.columns.clamp(1, 4)
+        )
+    } else {
+        String::new()
+    };
+    let watermark_html = render_watermark(s.watermark.as_deref());
 
     format!(
         r#"<!DOCTYPE html>
@@ -62,12 +71,26 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     padding: 2rem 1rem;
   }}
   .container {{
+    position: relative;
     max-width: 840px;
     margin: 0 auto;
     background: #ffffff;
     padding: 2.5rem 3rem;
     border-radius: 8px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    {columns_css}
+  }}
+  .doc-watermark {{
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-30deg);
+    font-size: 5rem;
+    font-weight: bold;
+    color: rgba(154, 160, 166, 0.3);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 0;
   }}
   h1 {{
     font-size: 1.5em;
@@ -221,7 +244,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
 </head>
 <body>
 <div class="container">
-{header}{body}{footer}</div>
+{watermark}{header}{body}{footer}</div>
 </body>
 </html>
 "#,
@@ -231,7 +254,19 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
         header = render_doc_header_footer("doc-header", s.header_text.as_deref()),
         body = body,
         footer = render_doc_header_footer("doc-footer", s.footer_text.as_deref()),
+        watermark = watermark_html,
+        columns_css = columns_css,
     )
+}
+
+/// 文書共通の透かし文字を本文の背面に表示する（1文書につき1箇所、CSSで回転・半透明表示）
+fn render_watermark(text: Option<&str>) -> String {
+    match text {
+        Some(t) if !t.trim().is_empty() => {
+            format!("<div class=\"doc-watermark\">{}</div>\n", html_escape(t.trim()))
+        }
+        _ => String::new(),
+    }
 }
 
 /// 文書共通のヘッダー・フッター文字列をHTMLの一箇所に描画する（HTMLはページ概念を持たないため、
@@ -394,6 +429,17 @@ fn render_html_block(
         Block::TableOfContents => {
             render_toc(out, toc_entries);
         }
+        Block::Columns { count, blocks } => {
+            let safe_count = (*count).clamp(2, 4);
+            let _ = writeln!(
+                out,
+                "<div style=\"column-count: {safe_count}; column-gap: 2rem;\">"
+            );
+            for b in blocks {
+                render_html_block(out, b, base_dir, toc_entries, heading_counter);
+            }
+            out.push_str("</div>\n");
+        }
     }
 }
 
@@ -423,6 +469,7 @@ fn collect_toc_entries_into(blocks: &[Block], out: &mut Vec<TocEntry>) {
                 });
             }
             Block::BlockQuote { blocks, .. } => collect_toc_entries_into(blocks, out),
+            Block::Columns { blocks, .. } => collect_toc_entries_into(blocks, out),
             _ => {}
         }
     }

@@ -21,6 +21,9 @@ const PAGEBREAK_MARKER: &str = "@@TYPER_PAGEBREAK@@";
 const TOC_MARKER: &str = "@@TYPER_TOC@@";
 const SPACE_MARKER_PREFIX: &str = "@@TYPER_SPACE:";
 const SPACE_MARKER_SUFFIX: &str = "@@";
+const COLUMNS_START_MARKER_PREFIX: &str = "@@TYPER_COLUMNS_START:";
+const COLUMNS_START_MARKER_SUFFIX: &str = "@@";
+const COLUMNS_END_MARKER: &str = "@@TYPER_COLUMNS_END@@";
 
 /// 原稿テキスト全体を解析して内部文書モデル (`Document`) を返す
 pub fn parse_document(input: &str) -> Document {
@@ -53,6 +56,8 @@ pub fn parse_document(input: &str) -> Document {
     let mut code_buffer = String::new();
 
     let mut in_table: Option<TableState> = None;
+
+    let mut in_columns: Option<(u8, Vec<Block>)> = None;
 
     for event in parser {
         match event {
@@ -157,7 +162,7 @@ pub fn parse_document(input: &str) -> Document {
                             content,
                             attrs,
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
+                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
                     }
                 }
                 TagEnd::Paragraph => {
@@ -172,6 +177,7 @@ pub fn parse_document(input: &str) -> Document {
                                 &mut blocks,
                                 &mut blockquote_blocks,
                                 in_blockquote,
+                                &mut in_columns,
                                 Block::PageBreak,
                             );
                             continue;
@@ -182,6 +188,7 @@ pub fn parse_document(input: &str) -> Document {
                                 &mut blocks,
                                 &mut blockquote_blocks,
                                 in_blockquote,
+                                &mut in_columns,
                                 Block::TableOfContents,
                             );
                             continue;
@@ -201,10 +208,34 @@ pub fn parse_document(input: &str) -> Document {
                                 &mut blocks,
                                 &mut blockquote_blocks,
                                 in_blockquote,
+                                &mut in_columns,
                                 Block::Spacer {
                                     height: height.to_string(),
                                 },
                             );
+                            continue;
+                        }
+                        if let Some(count_str) = trimmed
+                            .strip_prefix(COLUMNS_START_MARKER_PREFIX)
+                            .and_then(|s| s.strip_suffix(COLUMNS_START_MARKER_SUFFIX))
+                        {
+                            let count = count_str.parse::<u8>().unwrap_or(2).clamp(2, 4);
+                            in_columns = Some((count, Vec::new()));
+                            continue;
+                        }
+                        if trimmed == COLUMNS_END_MARKER {
+                            if let Some((count, col_blocks)) = in_columns.take() {
+                                push_block(
+                                    &mut blocks,
+                                    &mut blockquote_blocks,
+                                    in_blockquote,
+                                    &mut in_columns,
+                                    Block::Columns {
+                                        count,
+                                        blocks: col_blocks,
+                                    },
+                                );
+                            }
                             continue;
                         }
                     }
@@ -212,7 +243,7 @@ pub fn parse_document(input: &str) -> Document {
                     let content = expand_custom_inlines(raw_inlines);
                     let attrs = std::mem::take(&mut pending_attrs);
                     let block = Block::Paragraph { content, attrs };
-                    push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
+                    push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
                 }
                 TagEnd::BlockQuote(_) => {
                     in_blockquote = false;
@@ -236,7 +267,7 @@ pub fn parse_document(input: &str) -> Document {
                             items,
                             attrs,
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
+                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
                     }
                 }
                 TagEnd::CodeBlock => {
@@ -247,7 +278,7 @@ pub fn parse_document(input: &str) -> Document {
                         } else {
                             Block::CodeBlock { lang, code, attrs }
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
+                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
                     }
                 }
                 TagEnd::TableCell => {
@@ -279,7 +310,7 @@ pub fn parse_document(input: &str) -> Document {
                             rows: t.rows,
                             attrs: t.attrs,
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, block);
+                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
                     }
                 }
                 TagEnd::Strong
@@ -340,6 +371,7 @@ pub fn parse_document(input: &str) -> Document {
                     &mut blocks,
                     &mut blockquote_blocks,
                     in_blockquote,
+                    &mut in_columns,
                     Block::HorizontalRule,
                 );
             }
@@ -382,6 +414,12 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     }
     if !settings.show_page_number {
         frontmatter.push_str("page-number: off\n");
+    }
+    if settings.columns > 1 {
+        let _ = writeln!(frontmatter, "columns: {}", settings.columns);
+    }
+    if let Some(watermark) = &settings.watermark {
+        let _ = writeln!(frontmatter, "watermark: {watermark}");
     }
     frontmatter.push_str("---\n\n");
     frontmatter.push_str(trimmed_body);
@@ -445,9 +483,12 @@ fn push_block(
     blocks: &mut Vec<Block>,
     blockquote_blocks: &mut Vec<Block>,
     in_blockquote: bool,
+    in_columns: &mut Option<(u8, Vec<Block>)>,
     block: Block,
 ) {
-    if in_blockquote {
+    if let Some((_, col_blocks)) = in_columns {
+        col_blocks.push(block);
+    } else if in_blockquote {
         blockquote_blocks.push(block);
     } else {
         blocks.push(block);
@@ -573,6 +614,20 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     settings.show_page_number =
                         !matches!(v_low.as_str(), "off" | "false" | "no" | "none" | "0");
                 }
+                "columns" | "column" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.columns = n.clamp(1, 4);
+                    }
+                }
+                "watermark" => {
+                    let v_low = val.to_ascii_lowercase();
+                    if val.is_empty() || matches!(v_low.as_str(), "off" | "false" | "no" | "none")
+                    {
+                        settings.watermark = None;
+                    } else {
+                        settings.watermark = Some(val.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -623,6 +678,22 @@ fn preprocess_block_directives(body: &str) -> String {
             continue;
         }
 
+        if let Some(count) = parse_columns_start_directive(trimmed) {
+            out.push('\n');
+            out.push_str(COLUMNS_START_MARKER_PREFIX);
+            out.push_str(&count.to_string());
+            out.push_str(COLUMNS_START_MARKER_SUFFIX);
+            out.push_str("\n\n");
+            continue;
+        }
+
+        if is_columns_end_directive(trimmed) {
+            out.push('\n');
+            out.push_str(COLUMNS_END_MARKER);
+            out.push_str("\n\n");
+            continue;
+        }
+
         if let Some(height) = parse_space_directive(trimmed) {
             out.push('\n');
             out.push_str(SPACE_MARKER_PREFIX);
@@ -647,6 +718,32 @@ fn preprocess_block_directives(body: &str) -> String {
     }
 
     out
+}
+
+/// `:::columns 2` のような範囲指定段組み開始行を解析し、段数を返す（値省略時は既定で2段）
+fn parse_columns_start_directive(trimmed: &str) -> Option<u8> {
+    let rest = trimmed
+        .strip_prefix(":::columns")
+        .or_else(|| trimmed.strip_prefix("::: columns"))?;
+    // `:::columns-end` 等の終了行は別処理のため、直後に "-" が続く場合はここでは扱わない
+    if rest.starts_with('-') {
+        return None;
+    }
+    let val = rest.trim();
+    if val.is_empty() {
+        Some(2)
+    } else {
+        val.parse::<u8>().ok().map(|n| n.clamp(2, 4))
+    }
+}
+
+/// `:::columns-end` / `:::end-columns` のような範囲指定段組みの終了行かどうかを判定する
+fn is_columns_end_directive(trimmed: &str) -> bool {
+    let normalized = trimmed.to_ascii_lowercase().replace(' ', "");
+    matches!(
+        normalized.as_str(),
+        ":::columns-end" | ":::end-columns" | ":::columnsend" | ":::endcolumns"
+    )
 }
 
 /// `:::space 1em` のような明示的な垂直空白指定行を解析し、高さの文字列を返す
@@ -1054,6 +1151,39 @@ fn normalize_color(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_columns_directive_wraps_enclosed_blocks_only() {
+        let src = "本文A\n\n:::columns 3\n## 見出し\n本文B\n:::columns-end\n\n本文C\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.blocks.len(), 3);
+        assert!(matches!(&doc.blocks[0], Block::Paragraph { .. }));
+        match &doc.blocks[1] {
+            Block::Columns { count, blocks } => {
+                assert_eq!(*count, 3);
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(&blocks[0], Block::Heading { level: 2, .. }));
+                assert!(matches!(&blocks[1], Block::Paragraph { .. }));
+            }
+            other => panic!("Expected Columns block, got {other:?}"),
+        }
+        assert!(matches!(&doc.blocks[2], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn test_columns_directive_default_count_and_clamp() {
+        let default_doc = parse_document(":::columns\n本文\n:::columns-end\n");
+        match &default_doc.blocks[0] {
+            Block::Columns { count, .. } => assert_eq!(*count, 2),
+            other => panic!("Expected Columns block, got {other:?}"),
+        }
+
+        let clamped_doc = parse_document(":::columns 9\n本文\n:::columns-end\n");
+        match &clamped_doc.blocks[0] {
+            Block::Columns { count, .. } => assert_eq!(*count, 4),
+            other => panic!("Expected Columns block, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_frontmatter_and_table_widths() {

@@ -49,6 +49,12 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     } else {
         "none"
     };
+    let columns_param = if s.columns > 1 {
+        format!("\n  columns: {},", s.columns)
+    } else {
+        String::new()
+    };
+    let background_param = page_background_param(s.watermark.as_deref());
 
     // ページ・基本組版設定プリアンブル
     let _ = writeln!(
@@ -57,7 +63,7 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
   paper: "{paper}",
   flipped: {flipped},
   margin: {margin},
-  numbering: {numbering_param},{header_footer_params}
+  numbering: {numbering_param},{header_footer_params}{columns_param}{background_param}
 )
 #set text(
   font: {font_list},
@@ -219,6 +225,21 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
         }
         Block::TableOfContents => {
             out.push_str("#outline(depth: 3)\n\n");
+        }
+        Block::Columns {
+            count,
+            blocks: sub_blocks,
+        } => {
+            let mut inner = String::new();
+            for b in sub_blocks {
+                render_block(&mut inner, b, base_dir);
+            }
+            let safe_count = (*count).clamp(2, 4);
+            let _ = writeln!(
+                out,
+                "#columns({safe_count}, gutter: 18pt)[\n{}\n]\n",
+                inner.trim()
+            );
         }
     }
 }
@@ -599,6 +620,21 @@ fn page_header_footer_params(
     }
 
     params
+}
+
+/// `#set page(...)` に渡す `background:` 引数を組み立てる。透かし文字を本文の背面に
+/// 大きく回転させた薄灰色で配置し、各ページに繰り返し表示する。
+fn page_background_param(watermark: Option<&str>) -> String {
+    match watermark {
+        Some(text) if !text.trim().is_empty() => {
+            let mut safe = String::new();
+            escape_typst_text(&mut safe, text.trim());
+            format!(
+                "\n  background: place(center + horizon, rotate(-30deg, text(size: 64pt, fill: rgb(\"#9aa0a655\"), weight: \"bold\")[{safe}])),"
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 fn escape_typst_text(out: &mut String, text: &str) {

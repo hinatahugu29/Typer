@@ -52,6 +52,10 @@ pub struct DocumentSettings {
     pub footer_text: Option<String>,
     /// ページ番号を表示するか（既定: 表示する）
     pub show_page_number: bool,
+    /// 本文の段組み数（既定: 1 = 段組みなし。2〜4段をサポート）
+    pub columns: u8,
+    /// 透かし文字（例: "社外秘", "DRAFT"）。未指定時は非表示
+    pub watermark: Option<String>,
 }
 
 impl Default for DocumentSettings {
@@ -67,6 +71,8 @@ impl Default for DocumentSettings {
             header_text: None,
             footer_text: None,
             show_page_number: true,
+            columns: 1,
+            watermark: None,
         }
     }
 }
@@ -158,6 +164,8 @@ pub enum Block {
     PageBreak,
     /// `:::toc` で挿入する目次。見出し一覧から自動生成される（PDF出力はページ番号付き）
     TableOfContents,
+    /// `:::columns N` 〜 `:::columns-end` で囲んだ範囲だけを段組み表示するブロック
+    Columns { count: u8, blocks: Vec<Block> },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
