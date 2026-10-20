@@ -206,6 +206,12 @@ pub enum Inline {
         url: String,
         /// 画像の表示幅（例: "50%", "80mm"）。未指定時は既定の80%幅で表示
         width: Option<String>,
+        /// true の場合、本文の流れから外して現在位置に浮かせて重ね配置する（透過画像などの絶対配置用途）
+        float: bool,
+        /// float時の水平方向オフセット（例: "10mm"）。基準は現在のカーソル（段落）位置
+        offset_x: Option<String>,
+        /// float時の垂直方向オフセット（例: "-5mm"）。基準は現在のカーソル（段落）位置
+        offset_y: Option<String>,
     },
     SoftBreak,
     HardBreak,

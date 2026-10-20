@@ -473,8 +473,24 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                 render_inlines(out, text, base_dir);
                 out.push(']');
             }
-            Inline::Image { alt, url, width } => {
-                render_image_inline(out, alt, url, width.as_deref(), base_dir);
+            Inline::Image {
+                alt,
+                url,
+                width,
+                float,
+                offset_x,
+                offset_y,
+            } => {
+                render_image_inline(
+                    out,
+                    alt,
+                    url,
+                    width.as_deref(),
+                    *float,
+                    offset_x.as_deref(),
+                    offset_y.as_deref(),
+                    base_dir,
+                );
             }
             Inline::SoftBreak => {
                 out.push(' ');
@@ -491,12 +507,23 @@ fn render_image_inline(
     alt: &str,
     url: &str,
     width: Option<&str>,
+    float: bool,
+    offset_x: Option<&str>,
+    offset_y: Option<&str>,
     base_dir: Option<&Path>,
 ) {
     if let Some(resolved) = resolve_local_image_path(url, base_dir) {
         let vpath = encode_local_image_vpath(&resolved);
         let safe_width = sanitize_length(width.unwrap_or("80%"), "80%");
-        if alt.trim().is_empty() {
+        if float {
+            // 本文の流れから外し、現在位置を基準に浮かせて重ね配置する（透過画像などの絶対配置用途）
+            let dx = sanitize_length(offset_x.unwrap_or("0mm"), "0mm");
+            let dy = sanitize_length(offset_y.unwrap_or("0mm"), "0mm");
+            let _ = write!(
+                out,
+                "#place(top + left, dx: {dx}, dy: {dy}, float: false, image(\"/{vpath}\", width: {safe_width}, fit: \"contain\"))"
+            );
+        } else if alt.trim().is_empty() {
             let _ = write!(
                 out,
                 "#image(\"/{vpath}\", width: {safe_width}, fit: \"contain\")"

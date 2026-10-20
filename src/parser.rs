@@ -331,6 +331,9 @@ pub fn parse_document(input: &str) -> Document {
                                     alt,
                                     url,
                                     width: None,
+                                    float: false,
+                                    offset_x: None,
+                                    offset_y: None,
                                 }
                             }
                         };
@@ -951,36 +954,59 @@ fn expand_custom_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
     attach_image_size_attrs(out)
 }
 
-/// `![alt](url){width: 50%}` のように画像直後に置かれたサイズ指定を画像ノードへ取り込む。
-/// この時点では画像とサイズ指定のテキストは別々の `Inline` として隣接しているため、
-/// 直後のテキストが `{width: ...}` / `{w: ...}` で始まっていれば取り込んで消費する。
+/// `![alt](url){width: 50%, float: true, dx: 10mm, dy: -5mm}` のように画像直後に置かれた
+/// 属性指定を画像ノードへ取り込む。この時点では画像と属性指定のテキストは別々の `Inline` として
+/// 隣接しているため、直後のテキストが `{...}` で始まっていれば取り込んで消費する。
 fn attach_image_size_attrs(inlines: Vec<Inline>) -> Vec<Inline> {
     let mut out = Vec::with_capacity(inlines.len());
     let mut iter = inlines.into_iter().peekable();
 
     while let Some(inline) = iter.next() {
-        let Inline::Image { alt, url, width } = inline else {
+        let Inline::Image {
+            alt,
+            url,
+            width,
+            float,
+            offset_x,
+            offset_y,
+        } = inline
+        else {
             out.push(inline);
             continue;
         };
 
         let mut new_width = width;
+        let mut new_float = float;
+        let mut new_offset_x = offset_x;
+        let mut new_offset_y = offset_y;
         let mut remainder = None;
         if let Some(Inline::Text(next_text)) = iter.peek() {
-            if let Some((w, consumed)) = try_parse_image_size_attr(next_text) {
-                new_width = Some(w);
+            if let Some((parsed, consumed)) = try_parse_image_attrs(next_text) {
+                if parsed.width.is_some() {
+                    new_width = parsed.width;
+                }
+                new_float = parsed.float;
+                if parsed.offset_x.is_some() {
+                    new_offset_x = parsed.offset_x;
+                }
+                if parsed.offset_y.is_some() {
+                    new_offset_y = parsed.offset_y;
+                }
                 let rest = next_text[consumed..].to_string();
                 remainder = Some(rest);
             }
         }
         if remainder.is_some() {
-            iter.next(); // サイズ指定を含んでいたテキストノードを消費する
+            iter.next(); // 属性指定を含んでいたテキストノードを消費する
         }
 
         out.push(Inline::Image {
             alt,
             url,
             width: new_width,
+            float: new_float,
+            offset_x: new_offset_x,
+            offset_y: new_offset_y,
         });
         if let Some(rest) = remainder {
             if !rest.is_empty() {
@@ -992,22 +1018,71 @@ fn attach_image_size_attrs(inlines: Vec<Inline>) -> Vec<Inline> {
     out
 }
 
-/// 先頭が `{width: ...}` または `{w: ...}` であれば、指定値と消費したバイト数を返す
-fn try_parse_image_size_attr(text: &str) -> Option<(String, usize)> {
+/// `![alt](url){...}` の属性指定部分を解析した結果
+struct ImageAttrs {
+    width: Option<String>,
+    float: bool,
+    offset_x: Option<String>,
+    offset_y: Option<String>,
+}
+
+/// 先頭が `{width: ...}` / `{float: true, dx: ..., dy: ...}` のような画像属性指定であれば、
+/// 解析結果と消費したバイト数を返す。
+fn try_parse_image_attrs(text: &str) -> Option<(ImageAttrs, usize)> {
     if !text.starts_with('{') {
         return None;
     }
     let close = text.find('}')?;
     let inner = &text[1..close];
-    let low = inner.to_ascii_lowercase();
-    let rest = low
-        .strip_prefix("width:")
-        .or_else(|| low.strip_prefix("w:"))?;
-    let val = rest.trim();
-    if val.is_empty() {
+
+    let mut attrs = ImageAttrs {
+        width: None,
+        float: false,
+        offset_x: None,
+        offset_y: None,
+    };
+    let mut matched = false;
+
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim();
+            match key.as_str() {
+                "width" | "w" => {
+                    if !val.is_empty() {
+                        attrs.width = Some(val.to_string());
+                        matched = true;
+                    }
+                }
+                "float" => {
+                    attrs.float = val.eq_ignore_ascii_case("true");
+                    matched = true;
+                }
+                "dx" => {
+                    if !val.is_empty() {
+                        attrs.offset_x = Some(val.to_string());
+                        matched = true;
+                    }
+                }
+                "dy" => {
+                    if !val.is_empty() {
+                        attrs.offset_y = Some(val.to_string());
+                        matched = true;
+                    }
+                }
+                _ => {}
+            }
+        } else if part.eq_ignore_ascii_case("float") {
+            attrs.float = true;
+            matched = true;
+        }
+    }
+
+    if !matched {
         return None;
     }
-    Some((val.to_string(), close + 1))
+    Some((attrs, close + 1))
 }
 
 fn parse_inline_custom_spans(text: &str, out: &mut Vec<Inline>) {
@@ -1436,6 +1511,42 @@ line-height: 1.4
         match &doc.blocks[0] {
             Block::Paragraph { content, .. } => match &content[0] {
                 Inline::Image { width, .. } => assert_eq!(*width, None),
+                other => panic!("expected image, got {other:?}"),
+            },
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_float_attribute_with_offsets_parsed() {
+        let doc =
+            parse_document("![透かし](logo.png){width: 30%, float: true, dx: 10mm, dy: -5mm}\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => match &content[0] {
+                Inline::Image {
+                    width,
+                    float,
+                    offset_x,
+                    offset_y,
+                    ..
+                } => {
+                    assert_eq!(width.as_deref(), Some("30%"));
+                    assert!(*float);
+                    assert_eq!(offset_x.as_deref(), Some("10mm"));
+                    assert_eq!(offset_y.as_deref(), Some("-5mm"));
+                }
+                other => panic!("expected image, got {other:?}"),
+            },
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_without_float_attribute_defaults_to_inline_flow() {
+        let doc = parse_document("![図1](sample.png){width: 50%}\n");
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => match &content[0] {
+                Inline::Image { float, .. } => assert!(!float),
                 other => panic!("expected image, got {other:?}"),
             },
             other => panic!("expected paragraph, got {other:?}"),

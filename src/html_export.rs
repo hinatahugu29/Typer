@@ -641,7 +641,14 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                 render_html_inlines(out, text, base_dir);
                 out.push_str("</a>");
             }
-            Inline::Image { alt, url, width } => {
+            Inline::Image {
+                alt,
+                url,
+                width,
+                float,
+                offset_x,
+                offset_y,
+            } => {
                 let width_style = width
                     .as_ref()
                     .map(|w| format!(" style=\"width: {}; max-width: 100%;\"", html_escape(w)))
@@ -669,7 +676,22 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                     html_escape(url)
                 };
 
-                if alt.trim().is_empty() {
+                if *float {
+                    // 本文の流れから外し、現在位置を基準に浮かせて重ね配置する（透過画像などの絶対配置用途）
+                    let escaped_alt = html_escape(alt.trim());
+                    let dx = offset_x.as_deref().unwrap_or("0mm");
+                    let dy = offset_y.as_deref().unwrap_or("0mm");
+                    let img_style = width
+                        .as_ref()
+                        .map(|w| format!("width: {}; ", html_escape(w)))
+                        .unwrap_or_default();
+                    let _ = write!(
+                        out,
+                        "<span class=\"doc-image-float-anchor\" style=\"position: relative; display: inline-block; width: 0; height: 0; overflow: visible;\"><img src=\"{src_attr}\" alt=\"{escaped_alt}\" style=\"position: absolute; left: {}; top: {}; {img_style}max-width: none;\"></span>",
+                        html_escape(dx),
+                        html_escape(dy),
+                    );
+                } else if alt.trim().is_empty() {
                     let _ = write!(
                         out,
                         "<figure class=\"doc-image\"><img src=\"{src_attr}\" alt=\"\"{width_style}></figure>"
