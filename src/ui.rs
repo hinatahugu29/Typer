@@ -1132,6 +1132,70 @@ impl TyperApp {
             });
     }
 
+    /// 下部ステータスバーを描画する（ファイル名・カーソル位置・組版状態・直近出力の「開く」ボタン）
+    fn draw_status_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("bottom_status")
+            .exact_size(26.0)
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let file_label = self
+                        .current_file
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "未保存の文書".to_string());
+                    let dirty_mark = if self.is_dirty { " *" } else { "" };
+                    ui.label(RichText::new(format!("📄 {file_label}{dirty_mark}")).small());
+                    ui.separator();
+
+                    let line_count = self.markdown_text.lines().count();
+                    let char_count = self.markdown_text.chars().count();
+                    let (cur_line, cur_col) = self
+                        .cursor_char_range
+                        .map(|(c, _)| char_idx_to_line_col(&self.markdown_text, c))
+                        .unwrap_or((1, 1));
+                    ui.label(
+                        RichText::new(format!(
+                            "行 {cur_line}, 列 {cur_col}  ({line_count} 行 / {char_count} 文字)"
+                        ))
+                        .small(),
+                    );
+                    ui.separator();
+
+                    let page_count = self.page_textures.len();
+                    if self.is_compiling {
+                        ui.label(
+                            RichText::new("⏳ 組版更新中...")
+                                .small()
+                                .color(Color32::from_rgb(227, 116, 0)),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "✔ 全 {page_count} ページ (組版 {:.1} ms)",
+                                self.last_compile_ms
+                            ))
+                            .small()
+                            .color(Color32::from_rgb(24, 128, 56)),
+                        );
+                    }
+
+                    ui.separator();
+                    ui.label(RichText::new(&self.status_message).small().weak());
+
+                    if self.last_export_path.is_some() {
+                        ui.separator();
+                        if ui
+                            .small_button("📂 開く")
+                            .on_hover_text("直近に出力したファイルを既定のアプリで開きます")
+                            .clicked()
+                        {
+                            self.action_open_last_export();
+                        }
+                    }
+                });
+            });
+    }
+
     /// 検索・置換バーを描画する（一致件数表示・前後ジャンプ・個別/一括置換）
     fn draw_find_replace_bar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
@@ -1615,66 +1679,7 @@ impl eframe::App for TyperApp {
         }
 
         // 下部ステータスバー
-        egui::Panel::bottom("bottom_status")
-            .exact_size(26.0)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let file_label = self
-                        .current_file
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "未保存の文書".to_string());
-                    let dirty_mark = if self.is_dirty { " *" } else { "" };
-                    ui.label(RichText::new(format!("📄 {file_label}{dirty_mark}")).small());
-                    ui.separator();
-
-                    let line_count = self.markdown_text.lines().count();
-                    let char_count = self.markdown_text.chars().count();
-                    let (cur_line, cur_col) = self
-                        .cursor_char_range
-                        .map(|(c, _)| char_idx_to_line_col(&self.markdown_text, c))
-                        .unwrap_or((1, 1));
-                    ui.label(
-                        RichText::new(format!(
-                            "行 {cur_line}, 列 {cur_col}  ({line_count} 行 / {char_count} 文字)"
-                        ))
-                        .small(),
-                    );
-                    ui.separator();
-
-                    let page_count = self.page_textures.len();
-                    if self.is_compiling {
-                        ui.label(
-                            RichText::new("⏳ 組版更新中...")
-                                .small()
-                                .color(Color32::from_rgb(227, 116, 0)),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new(format!(
-                                "✔ 全 {page_count} ページ (組版 {:.1} ms)",
-                                self.last_compile_ms
-                            ))
-                            .small()
-                            .color(Color32::from_rgb(24, 128, 56)),
-                        );
-                    }
-
-                    ui.separator();
-                    ui.label(RichText::new(&self.status_message).small().weak());
-
-                    if self.last_export_path.is_some() {
-                        ui.separator();
-                        if ui
-                            .small_button("📂 開く")
-                            .on_hover_text("直近に出力したファイルを既定のアプリで開きます")
-                            .clicked()
-                        {
-                            self.action_open_last_export();
-                        }
-                    }
-                });
-            });
+        self.draw_status_bar(ui);
 
         // 右ペイン：ページプレビュー領域
         egui::Panel::right("preview_panel")
