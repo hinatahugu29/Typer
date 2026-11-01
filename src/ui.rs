@@ -955,6 +955,183 @@ impl TyperApp {
             });
     }
 
+    /// ページ・基本書式設定GUIバーを描画する（フロントマターと双方向同期）
+    fn draw_page_settings_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("page_settings_bar")
+            .exact_size(34.0)
+            .show(ui, |ui| {
+                let mut doc_settings = parse_document(&self.markdown_text).settings;
+                let mut changed = false;
+
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(RichText::new("⚙ 文書設定:").small().strong());
+
+                    // 用紙向き
+                    let is_portrait = doc_settings.orientation == Orientation::Portrait;
+                    if ui.selectable_label(is_portrait, "A4 縦").clicked() && !is_portrait {
+                        doc_settings.orientation = Orientation::Portrait;
+                        changed = true;
+                    }
+                    if ui.selectable_label(!is_portrait, "A4 横").clicked() && is_portrait {
+                        doc_settings.orientation = Orientation::Landscape;
+                        changed = true;
+                    }
+
+                    ui.separator();
+
+                    // フォント選択
+                    let is_gothic = doc_settings.font_choice == FontChoice::Gothic;
+                    if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic {
+                        doc_settings.font_choice = FontChoice::Gothic;
+                        changed = true;
+                    }
+                    if ui.selectable_label(!is_gothic, "明朝体").clicked() && is_gothic {
+                        doc_settings.font_choice = FontChoice::Mincho;
+                        changed = true;
+                    }
+
+                    ui.separator();
+
+                    // 余白選択
+                    ui.label(RichText::new("余白:").small());
+                    for (label, val) in [
+                        ("狭 15mm", "15mm"),
+                        ("標準 20mm", "20mm"),
+                        ("広 25mm", "25mm"),
+                    ] {
+                        if ui
+                            .selectable_label(doc_settings.margin == val, label)
+                            .clicked()
+                            && doc_settings.margin != val
+                        {
+                            doc_settings.margin = val.to_string();
+                            changed = true;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // 文字サイズ選択
+                    ui.label(RichText::new("文字:").small());
+                    for val in ["9.5pt", "10pt", "10.5pt", "11pt", "12pt"] {
+                        if ui
+                            .selectable_label(doc_settings.font_size == val, val)
+                            .clicked()
+                            && doc_settings.font_size != val
+                        {
+                            doc_settings.font_size = val.to_string();
+                            changed = true;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // 基本行間スライダー
+                    ui.label(RichText::new("行間:").small());
+                    let mut lh = doc_settings.line_height;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut lh, 1.1..=2.2)
+                                .step_by(0.1)
+                                .fixed_decimals(1),
+                        )
+                        .changed()
+                    {
+                        doc_settings.line_height = lh;
+                        changed = true;
+                    }
+
+                    ui.separator();
+
+                    // アクセントカラー選択（見出し罫線・表ヘッダ・リンク色等に反映）
+                    ui.label(RichText::new("配色:").small());
+                    for (label, hex) in [
+                        ("青", "#1a73e8"),
+                        ("緑", "#188038"),
+                        ("赤", "#c5221f"),
+                        ("紫", "#8430ce"),
+                        ("橙", "#e37400"),
+                    ] {
+                        let is_selected = doc_settings.accent_color.eq_ignore_ascii_case(hex);
+                        if ui.selectable_label(is_selected, label).clicked() && !is_selected {
+                            doc_settings.accent_color = hex.to_string();
+                            changed = true;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // ページ番号表示のON/OFF
+                    if ui
+                        .checkbox(&mut doc_settings.show_page_number, "ページ番号")
+                        .on_hover_text(
+                            "PDF出力時の各ページ下部のページ番号表示を切り替えます（フロントマターの page-number と連動）",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+
+                    ui.separator();
+
+                    // 段組み選択（1〜3段）
+                    ui.label(RichText::new("段組み:").small());
+                    for (label, n) in [("1段", 1u8), ("2段", 2u8), ("3段", 3u8)] {
+                        if ui
+                            .selectable_label(doc_settings.columns == n, label)
+                            .clicked()
+                            && doc_settings.columns != n
+                        {
+                            doc_settings.columns = n;
+                            changed = true;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // 透かし文字のON/OFF（フロントマターの watermark と連動）
+                    let mut watermark_on = doc_settings.watermark.is_some();
+                    if ui
+                        .checkbox(&mut watermark_on, "透かし")
+                        .on_hover_text(
+                            "本文背面に薄く表示する透かし文字（例: 社外秘・DRAFT）を切り替えます",
+                        )
+                        .changed()
+                    {
+                        doc_settings.watermark = if watermark_on {
+                            Some("社外秘".to_string())
+                        } else {
+                            None
+                        };
+                        changed = true;
+                    }
+                    if let Some(watermark) = doc_settings.watermark.as_mut() {
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(watermark)
+                                    .desired_width(70.0)
+                                    .hint_text("社外秘"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+
+                if changed {
+                    self.push_undo_snapshot();
+                    self.markdown_text =
+                        update_document_settings_in_markdown(&self.markdown_text, &doc_settings);
+                    self.is_dirty = true;
+                    self.revision += 1;
+                    self.pending_render = true;
+                    self.last_edit_time = Instant::now();
+                }
+            });
+    }
+
     /// 検索・置換バーを描画する（一致件数表示・前後ジャンプ・個別/一括置換）
     fn draw_find_replace_bar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
@@ -1434,182 +1611,7 @@ impl eframe::App for TyperApp {
 
         // ページ・基本書式設定GUIバー（フロントマターと双方向同期）
         if self.show_page_settings_bar {
-            egui::Panel::top("page_settings_bar")
-                .exact_size(34.0)
-                .show(ui, |ui| {
-                    let mut doc_settings = parse_document(&self.markdown_text).settings;
-                    let mut changed = false;
-
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(RichText::new("⚙ 文書設定:").small().strong());
-
-                        // 用紙向き
-                        let is_portrait = doc_settings.orientation == Orientation::Portrait;
-                        if ui.selectable_label(is_portrait, "A4 縦").clicked() && !is_portrait {
-                            doc_settings.orientation = Orientation::Portrait;
-                            changed = true;
-                        }
-                        if ui.selectable_label(!is_portrait, "A4 横").clicked() && is_portrait {
-                            doc_settings.orientation = Orientation::Landscape;
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // フォント選択
-                        let is_gothic = doc_settings.font_choice == FontChoice::Gothic;
-                        if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic
-                        {
-                            doc_settings.font_choice = FontChoice::Gothic;
-                            changed = true;
-                        }
-                        if ui.selectable_label(!is_gothic, "明朝体").clicked() && is_gothic {
-                            doc_settings.font_choice = FontChoice::Mincho;
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // 余白選択
-                        ui.label(RichText::new("余白:").small());
-                        for (label, val) in [
-                            ("狭 15mm", "15mm"),
-                            ("標準 20mm", "20mm"),
-                            ("広 25mm", "25mm"),
-                        ] {
-                            if ui
-                                .selectable_label(doc_settings.margin == val, label)
-                                .clicked()
-                                && doc_settings.margin != val
-                            {
-                                doc_settings.margin = val.to_string();
-                                changed = true;
-                            }
-                        }
-
-                        ui.separator();
-
-                        // 文字サイズ選択
-                        ui.label(RichText::new("文字:").small());
-                        for val in ["9.5pt", "10pt", "10.5pt", "11pt", "12pt"] {
-                            if ui
-                                .selectable_label(doc_settings.font_size == val, val)
-                                .clicked()
-                                && doc_settings.font_size != val
-                            {
-                                doc_settings.font_size = val.to_string();
-                                changed = true;
-                            }
-                        }
-
-                        ui.separator();
-
-                        // 基本行間スライダー
-                        ui.label(RichText::new("行間:").small());
-                        let mut lh = doc_settings.line_height;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut lh, 1.1..=2.2)
-                                    .step_by(0.1)
-                                    .fixed_decimals(1),
-                            )
-                            .changed()
-                        {
-                            doc_settings.line_height = lh;
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // アクセントカラー選択（見出し罫線・表ヘッダ・リンク色等に反映）
-                        ui.label(RichText::new("配色:").small());
-                        for (label, hex) in [
-                            ("青", "#1a73e8"),
-                            ("緑", "#188038"),
-                            ("赤", "#c5221f"),
-                            ("紫", "#8430ce"),
-                            ("橙", "#e37400"),
-                        ] {
-                            let is_selected = doc_settings.accent_color.eq_ignore_ascii_case(hex);
-                            if ui.selectable_label(is_selected, label).clicked() && !is_selected {
-                                doc_settings.accent_color = hex.to_string();
-                                changed = true;
-                            }
-                        }
-
-                        ui.separator();
-
-                        // ページ番号表示のON/OFF
-                        if ui
-                            .checkbox(&mut doc_settings.show_page_number, "ページ番号")
-                            .on_hover_text(
-                                "PDF出力時の各ページ下部のページ番号表示を切り替えます（フロントマターの page-number と連動）",
-                            )
-                            .changed()
-                        {
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // 段組み選択（1〜3段）
-                        ui.label(RichText::new("段組み:").small());
-                        for (label, n) in [("1段", 1u8), ("2段", 2u8), ("3段", 3u8)] {
-                            if ui
-                                .selectable_label(doc_settings.columns == n, label)
-                                .clicked()
-                                && doc_settings.columns != n
-                            {
-                                doc_settings.columns = n;
-                                changed = true;
-                            }
-                        }
-
-                        ui.separator();
-
-                        // 透かし文字のON/OFF（フロントマターの watermark と連動）
-                        let mut watermark_on = doc_settings.watermark.is_some();
-                        if ui
-                            .checkbox(&mut watermark_on, "透かし")
-                            .on_hover_text(
-                                "本文背面に薄く表示する透かし文字（例: 社外秘・DRAFT）を切り替えます",
-                            )
-                            .changed()
-                        {
-                            doc_settings.watermark = if watermark_on {
-                                Some("社外秘".to_string())
-                            } else {
-                                None
-                            };
-                            changed = true;
-                        }
-                        if let Some(watermark) = doc_settings.watermark.as_mut() {
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(watermark)
-                                        .desired_width(70.0)
-                                        .hint_text("社外秘"),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    });
-
-                    if changed {
-                        self.push_undo_snapshot();
-                        self.markdown_text = update_document_settings_in_markdown(
-                            &self.markdown_text,
-                            &doc_settings,
-                        );
-                        self.is_dirty = true;
-                        self.revision += 1;
-                        self.pending_render = true;
-                        self.last_edit_time = Instant::now();
-                    }
-                });
+            self.draw_page_settings_bar(ui);
         }
 
         // 下部ステータスバー
