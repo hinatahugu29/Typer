@@ -2,18 +2,126 @@
 //!
 //! 外部のdocx生成専用クレートに頼らず、最小限の有効なOOXML（Office Open XML）を直接組み立てて
 //! `zip` クレートでパッケージングする。見出し・段落・表・リスト・改ページ・目次（Wordのフィールド
-//! コードによる自動生成TOC）などに対応するが、画像埋め込みと実クリックリンクは今回のv1では
-//! 非対応（代替としてテキスト表記で出力する）。
+//! コードによる自動生成TOC）、PNG/JPEG/GIFのローカル画像埋め込みに対応する。
+//! SVG/WebP画像、画像の浮動配置（`float: true`）、実クリック可能なハイパーリンクは
+//! 今回も非対応（代替としてテキスト表記で出力する）。
 
 use std::io::{Cursor, Write};
+use std::path::Path;
 
 use crate::model::{Alignment, Block, Document, FontChoice, Inline, InlineStyle, Orientation};
+use crate::typst_gen::resolve_local_image_path;
 
-/// 内部文書モデルから .docx ファイルのバイト列を生成する
-pub fn generate_docx_bytes(doc: &Document) -> Result<Vec<u8>, String> {
-    let body_xml = render_docx_body(&doc.blocks);
+/// 埋め込み対象として採用したローカル画像1件分のデータ
+struct EmbeddedImage {
+    relationship_id: String,
+    file_name: String,
+    content_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+/// 文書中の画像を集め、Word文書パッケージへ埋め込むための情報を蓄積するコンテキスト
+#[derive(Default)]
+struct DocxImageCollector {
+    images: Vec<EmbeddedImage>,
+}
+
+impl DocxImageCollector {
+    /// ローカル画像を読み込んで登録し、本文から参照するための relationship ID を返す。
+    /// 読み込めない画像（リンク切れ・SVG/WebP等の非対応形式・外部URL）は `None` を返す。
+    fn register(&mut self, url: &str, base_dir: Option<&Path>) -> Option<(String, u32, u32)> {
+        let resolved = resolve_local_image_path(url, base_dir)?;
+        let bytes = std::fs::read(&resolved).ok()?;
+        let ext = resolved
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let content_type: &'static str = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            _ => return None, // SVG/WebP等はWordのレガシーメディア形式として非対応
+        };
+        let (px_w, px_h) = probe_image_pixel_size(&bytes, &ext).unwrap_or((400, 300));
+
+        let index = self.images.len() + 1;
+        let relationship_id = format!("rIdImg{index}");
+        let file_name = format!("image{index}.{}", if ext == "jpg" { "jpeg" } else { &ext });
+        self.images.push(EmbeddedImage {
+            relationship_id: relationship_id.clone(),
+            file_name,
+            content_type,
+            bytes,
+        });
+        Some((relationship_id, px_w, px_h))
+    }
+}
+
+/// PNG/JPEG/GIFのヘッダーからピクセルサイズを読み取る（ファイル全体のデコードは行わない軽量実装）
+fn probe_image_pixel_size(bytes: &[u8], ext: &str) -> Option<(u32, u32)> {
+    match ext {
+        "png" => {
+            if bytes.len() >= 24 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+                let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+                let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+                Some((w, h))
+            } else {
+                None
+            }
+        }
+        "gif" => {
+            if bytes.len() >= 10 && (&bytes[0..3] == b"GIF") {
+                let w = u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32;
+                let h = u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32;
+                Some((w, h))
+            } else {
+                None
+            }
+        }
+        "jpg" | "jpeg" => probe_jpeg_pixel_size(bytes),
+        _ => None,
+    }
+}
+
+/// JPEGのSOFセグメントを走査して幅・高さを取得する
+fn probe_jpeg_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut pos = 2usize;
+    while pos + 4 <= bytes.len() {
+        if bytes[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        let marker = bytes[pos + 1];
+        // SOF0-SOF3, SOF5-SOF7, SOF9-SOF11, SOF13-SOF15 のいずれか（高さ・幅を持つセグメント）
+        let is_sof = matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF);
+        let segment_len = u16::from_be_bytes(bytes[pos + 2..pos + 4].try_into().ok()?) as usize;
+        if is_sof {
+            if pos + 9 > bytes.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes(bytes[pos + 5..pos + 7].try_into().ok()?) as u32;
+            let w = u16::from_be_bytes(bytes[pos + 7..pos + 9].try_into().ok()?) as u32;
+            return Some((w, h));
+        }
+        if marker == 0xD8 || marker == 0xD9 {
+            pos += 2;
+            continue;
+        }
+        pos += 2 + segment_len;
+    }
+    None
+}
+
+/// 内部文書モデルから .docx ファイルのバイト列を生成する（相対パス画像の解決基準ディレクトリ付き）
+pub fn generate_docx_bytes_with_base(doc: &Document, base_dir: Option<&Path>) -> Result<Vec<u8>, String> {
+    let mut images = DocxImageCollector::default();
+    let body_xml = render_docx_body(&doc.blocks, base_dir, &mut images);
     let document_xml = wrap_document_xml(&doc, &body_xml);
-    build_docx_zip(&document_xml)
+    build_docx_zip(&document_xml, &images.images)
 }
 
 fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
@@ -71,16 +179,26 @@ fn length_to_twips(raw: &str, default_twips: i64) -> i64 {
     default_twips
 }
 
-fn render_docx_body(blocks: &[Block]) -> String {
+fn render_docx_body(
+    blocks: &[Block],
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
+) -> String {
     let mut out = String::new();
     let mut heading_index = 0usize;
     for block in blocks {
-        render_docx_block(&mut out, block, &mut heading_index);
+        render_docx_block(&mut out, block, &mut heading_index, base_dir, images);
     }
     out
 }
 
-fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize) {
+fn render_docx_block(
+    out: &mut String,
+    block: &Block,
+    heading_index: &mut usize,
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
+) {
     match block {
         Block::Heading {
             level,
@@ -107,6 +225,8 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                     size_half_pt: Some(sz),
                     ..Default::default()
                 },
+                base_dir,
+                images,
             );
             out.push_str("</w:p>\n");
             *heading_index += 1;
@@ -118,7 +238,7 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
             } else {
                 out.push_str(&format!("    <w:p><w:pPr>{ind}</w:pPr>"));
             }
-            render_docx_runs(out, content, RunStyle::default());
+            render_docx_runs(out, content, RunStyle::default(), base_dir, images);
             out.push_str("</w:p>\n");
         }
         Block::List {
@@ -138,7 +258,7 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                     "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
                     xml_escape(&prefix)
                 ));
-                render_docx_runs(out, item, RunStyle::default());
+                render_docx_runs(out, item, RunStyle::default(), base_dir, images);
                 out.push_str("</w:p>\n");
             }
         }
@@ -175,6 +295,8 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                         alignments.get(i).copied().flatten(),
                         true,
                         bg,
+                        base_dir,
+                        images,
                     );
                 }
                 out.push_str("      </w:tr>\n");
@@ -189,6 +311,8 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
                         alignments.get(i).copied().flatten(),
                         false,
                         None,
+                        base_dir,
+                        images,
                     );
                 }
                 out.push_str("      </w:tr>\n");
@@ -199,7 +323,7 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
             for b in blocks {
                 // 引用は左インデントを付けて表現する（罫線囲みの再現は見送り）
                 let mut inner = String::new();
-                render_docx_block(&mut inner, b, heading_index);
+                render_docx_block(&mut inner, b, heading_index, base_dir, images);
                 out.push_str(&inner.replace("<w:pPr>", "<w:pPr><w:ind w:left=\"720\"/>"));
             }
         }
@@ -236,7 +360,7 @@ fn render_docx_block(out: &mut String, block: &Block, heading_index: &mut usize)
         Block::Columns { blocks, .. } => {
             // Word出力は段組みを再現できないため、範囲内のブロックを通常の縦積みとして展開する
             for b in blocks {
-                render_docx_block(out, b, heading_index);
+                render_docx_block(out, b, heading_index, base_dir, images);
             }
         }
     }
@@ -272,6 +396,8 @@ fn render_docx_table_cell(
     align: Option<Alignment>,
     is_header: bool,
     header_bg: Option<&str>,
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
 ) {
     out.push_str("        <w:tc><w:tcPr>");
     if let Some(bg) = header_bg {
@@ -290,7 +416,7 @@ fn render_docx_table_cell(
         ..Default::default()
     };
     if let Some(content) = cell {
-        render_docx_runs(out, content, base_style);
+        render_docx_runs(out, content, base_style, base_dir, images);
     }
     out.push_str("</w:p>\n        </w:tc>\n");
 }
@@ -309,14 +435,22 @@ struct RunStyle {
 enum RunItem {
     Text(String, RunStyle),
     Break,
+    Drawing(String),
 }
 
-fn render_docx_runs(out: &mut String, inlines: &[Inline], base_style: RunStyle) {
+fn render_docx_runs(
+    out: &mut String,
+    inlines: &[Inline],
+    base_style: RunStyle,
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
+) {
     let mut items = Vec::new();
-    collect_runs(inlines, base_style, &mut items);
+    collect_runs(inlines, base_style, base_dir, images, &mut items);
     for item in items {
         match item {
             RunItem::Break => out.push_str("<w:r><w:br/></w:r>"),
+            RunItem::Drawing(xml) => out.push_str(&xml),
             RunItem::Text(text, style) => {
                 if text.is_empty() {
                     continue;
@@ -351,7 +485,13 @@ fn render_docx_runs(out: &mut String, inlines: &[Inline], base_style: RunStyle) 
     }
 }
 
-fn collect_runs(inlines: &[Inline], style: RunStyle, out: &mut Vec<RunItem>) {
+fn collect_runs(
+    inlines: &[Inline],
+    style: RunStyle,
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
+    out: &mut Vec<RunItem>,
+) {
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push(RunItem::Text(t.clone(), style.clone())),
@@ -363,37 +503,100 @@ fn collect_runs(inlines: &[Inline], style: RunStyle, out: &mut Vec<RunItem>) {
             Inline::Strong(c) => {
                 let mut s = style.clone();
                 s.bold = true;
-                collect_runs(c, s, out);
+                collect_runs(c, s, base_dir, images, out);
             }
             Inline::Emphasis(c) => {
                 let mut s = style.clone();
                 s.italic = true;
-                collect_runs(c, s, out);
+                collect_runs(c, s, base_dir, images, out);
             }
             Inline::Strikethrough(c) => {
                 let mut s = style.clone();
                 s.strikethrough = true;
-                collect_runs(c, s, out);
+                collect_runs(c, s, base_dir, images, out);
             }
             Inline::Styled { content, style: st } => {
                 let mut s = style.clone();
                 apply_inline_style(&mut s, st);
-                collect_runs(content, s, out);
+                collect_runs(content, s, base_dir, images, out);
             }
             Inline::Link { text, url: _ } => {
                 // 実クリック可能なハイパーリンクは今回のv1では非対応のため、装飾のみ再現する
                 let mut s = style.clone();
                 s.underline = true;
                 s.color = Some("1A73E8".to_string());
-                collect_runs(text, s, out);
+                collect_runs(text, s, base_dir, images, out);
             }
-            Inline::Image { alt, .. } => {
-                out.push(RunItem::Text(format!("[画像: {alt}]"), style.clone()));
+            Inline::Image { alt, url, width, .. } => {
+                // floatによる絶対配置はWord出力では再現しないため、通常の本文内画像として埋め込む
+                match images.register(url, base_dir) {
+                    Some((rel_id, px_w, px_h)) => {
+                        out.push(RunItem::Drawing(render_docx_image_drawing(
+                            &rel_id,
+                            px_w,
+                            px_h,
+                            width.as_deref(),
+                            alt,
+                        )));
+                    }
+                    None => {
+                        out.push(RunItem::Text(format!("[画像: {alt}]"), style.clone()));
+                    }
+                }
             }
             Inline::SoftBreak => out.push(RunItem::Text(" ".to_string(), style.clone())),
             Inline::HardBreak => out.push(RunItem::Break),
         }
     }
+}
+
+/// 画像1枚分の `<w:drawing>` を含むランXMLを生成する。
+/// `width_attr`（`{width: 50%}` 等）が指定されていればページ幅に対する比率として解釈し、
+/// 指定がなければ元画像のピクセルサイズをそのまま96dpi換算で採用する（過度に大きい場合は既定最大幅に収める）。
+fn render_docx_image_drawing(
+    rel_id: &str,
+    px_w: u32,
+    px_h: u32,
+    width_attr: Option<&str>,
+    alt: &str,
+) -> String {
+    const EMU_PER_PX_AT_96DPI: f64 = 9525.0;
+    const DEFAULT_CONTENT_WIDTH_EMU: f64 = 6_000_000.0; // A4縦・余白20mm相当の目安本文幅
+    const MAX_WIDTH_EMU: f64 = DEFAULT_CONTENT_WIDTH_EMU;
+
+    let aspect = if px_w > 0 {
+        px_h as f64 / px_w as f64
+    } else {
+        0.75
+    };
+
+    let width_emu = if let Some(pct) = width_attr
+        .and_then(|w| w.trim().strip_suffix('%'))
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
+        DEFAULT_CONTENT_WIDTH_EMU * (pct / 100.0)
+    } else {
+        (px_w as f64 * EMU_PER_PX_AT_96DPI).min(MAX_WIDTH_EMU)
+    };
+    let height_emu = width_emu * aspect;
+    let (width_emu, height_emu) = (width_emu.round() as i64, height_emu.round() as i64);
+
+    let escaped_alt = xml_escape(alt);
+    format!(
+        "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" \
+xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">\
+<wp:extent cx=\"{width_emu}\" cy=\"{height_emu}\"/>\
+<wp:docPr id=\"0\" name=\"{escaped_alt}\" descr=\"{escaped_alt}\"/>\
+<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
+<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
+<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
+<pic:nvPicPr><pic:cNvPr id=\"0\" name=\"{escaped_alt}\"/><pic:cNvPicPr/></pic:nvPicPr>\
+<pic:blipFill><a:blip r:embed=\"{rel_id}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/>\
+<a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
+<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{width_emu}\" cy=\"{height_emu}\"/></a:xfrm>\
+<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>\
+</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+    )
 }
 
 fn apply_inline_style(target: &mut RunStyle, style: &InlineStyle) {
@@ -446,21 +649,72 @@ fn xml_escape(text: &str) -> String {
     out
 }
 
-const CONTENT_TYPES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>
-"#;
-
 const ROOT_RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>
 "#;
 
-fn build_docx_zip(document_xml: &str) -> Result<Vec<u8>, String> {
+fn content_types_xml(images: &[EmbeddedImage]) -> String {
+    let mut extensions: Vec<&str> = Vec::new();
+    for img in images {
+        let ext = match img.content_type {
+            "image/png" => "png",
+            "image/jpeg" => "jpeg",
+            "image/gif" => "gif",
+            _ => continue,
+        };
+        if !extensions.contains(&ext) {
+            extensions.push(ext);
+        }
+    }
+    let image_defaults: String = extensions
+        .iter()
+        .map(|ext| {
+            let content_type = match *ext {
+                "png" => "image/png",
+                "gif" => "image/gif",
+                _ => "image/jpeg",
+            };
+            format!(r#"  <Default Extension="{ext}" ContentType="{content_type}"/>"#)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+{image_defaults}
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"#
+    )
+}
+
+fn document_rels_xml(images: &[EmbeddedImage]) -> String {
+    let relationships: String = images
+        .iter()
+        .map(|img| {
+            format!(
+                r#"  <Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{}"/>"#,
+                img.relationship_id, img.file_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{relationships}
+</Relationships>
+"#
+    )
+}
+
+fn build_docx_zip(document_xml: &str, images: &[EmbeddedImage]) -> Result<Vec<u8>, String> {
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
     let options: zip::write::FileOptions<'_, '_, ()> =
@@ -468,7 +722,7 @@ fn build_docx_zip(document_xml: &str) -> Result<Vec<u8>, String> {
 
     zip.start_file("[Content_Types].xml", options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(CONTENT_TYPES_XML.as_bytes())
+    zip.write_all(content_types_xml(images).as_bytes())
         .map_err(|e| e.to_string())?;
 
     zip.start_file("_rels/.rels", options)
@@ -480,6 +734,19 @@ fn build_docx_zip(document_xml: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     zip.write_all(document_xml.as_bytes())
         .map_err(|e| e.to_string())?;
+
+    if !images.is_empty() {
+        zip.start_file("word/_rels/document.xml.rels", options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(document_rels_xml(images).as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        for img in images {
+            zip.start_file(format!("word/media/{}", img.file_name), options)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&img.bytes).map_err(|e| e.to_string())?;
+        }
+    }
 
     let cursor = zip.finish().map_err(|e| e.to_string())?;
     Ok(cursor.into_inner())
@@ -494,7 +761,7 @@ mod tests {
     fn test_generate_docx_bytes_is_a_valid_zip_with_required_parts() {
         let doc =
             parse_document("# 見出し\n\n本文です。\n\n| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
-        let bytes = generate_docx_bytes(&doc).expect("docx generation should succeed");
+        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
         assert!(
             bytes.starts_with(b"PK"),
             "docx must be a zip (PK magic bytes)"
@@ -522,7 +789,8 @@ mod tests {
         let doc = parse_document("**太字** *斜体* [下線]{underline}\n");
         let mut out = String::new();
         let mut idx = 0usize;
-        render_docx_block(&mut out, &doc.blocks[0], &mut idx);
+        let mut images = DocxImageCollector::default();
+        render_docx_block(&mut out, &doc.blocks[0], &mut idx, None, &mut images);
         assert!(out.contains("<w:b/>"));
         assert!(out.contains("<w:i/>"));
         assert!(out.contains("<w:u w:val=\"single\"/>"));
@@ -533,7 +801,8 @@ mod tests {
         let doc = parse_document("{indent-left: 10mm, indent-right: 5mm}\n段落\n");
         let mut out = String::new();
         let mut idx = 0usize;
-        render_docx_block(&mut out, &doc.blocks[0], &mut idx);
+        let mut images = DocxImageCollector::default();
+        render_docx_block(&mut out, &doc.blocks[0], &mut idx, None, &mut images);
         assert!(out.contains("<w:ind w:left=\"567\" w:right=\"283\"/>"));
     }
 
@@ -542,7 +811,8 @@ mod tests {
         let doc = parse_document("5. 五番目\n6. 六番目\n");
         let mut out = String::new();
         let mut idx = 0usize;
-        render_docx_block(&mut out, &doc.blocks[0], &mut idx);
+        let mut images = DocxImageCollector::default();
+        render_docx_block(&mut out, &doc.blocks[0], &mut idx, None, &mut images);
         assert!(out.contains(">5. <"));
         assert!(out.contains(">6. <"));
     }
@@ -565,7 +835,7 @@ mod tests {
             :::space 1em\n\n\
             ```typst\n#line(length: 50%)\n```\n";
         let doc = parse_document(src);
-        let bytes = generate_docx_bytes(&doc).expect("docx generation should succeed");
+        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
 
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
@@ -579,10 +849,65 @@ mod tests {
         }
     }
 
+    /// 1x1透過PNGの最小バイト列（テスト用フィクスチャ）
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn test_probe_png_pixel_size_reads_width_and_height() {
+        assert_eq!(probe_image_pixel_size(TINY_PNG, "png"), Some((1, 1)));
+    }
+
+    #[test]
+    fn test_docx_embeds_local_png_as_media_with_relationship() {
+        let dir = std::env::temp_dir().join(format!(
+            "typer_docx_image_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("pic.png");
+        std::fs::write(&img_path, TINY_PNG).unwrap();
+
+        let doc = parse_document("![テスト画像](pic.png)\n");
+        let bytes = generate_docx_bytes_with_base(&doc, Some(dir.as_path()))
+            .expect("docx generation with image should succeed");
+
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"word/media/image1.png".to_string()));
+        assert!(names.contains(&"word/_rels/document.xml.rels".to_string()));
+
+        let mut contents = String::new();
+        {
+            let mut doc_xml_file = archive.by_name("word/document.xml").unwrap();
+            std::io::Read::read_to_string(&mut doc_xml_file, &mut contents).unwrap();
+        }
+        assert!(contents.contains("<w:drawing>"));
+        assert!(contents.contains("r:embed=\"rIdImg1\""));
+
+        let mut rels_contents = String::new();
+        {
+            let mut rels_file = archive.by_name("word/_rels/document.xml.rels").unwrap();
+            std::io::Read::read_to_string(&mut rels_file, &mut rels_contents).unwrap();
+        }
+        assert!(rels_contents.contains("rIdImg1"));
+        assert!(rels_contents.contains("media/image1.png"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_docx_toc_directive_renders_field_code() {
         let doc = parse_document("# 見出し\n\n:::toc\n");
-        let bytes = generate_docx_bytes(&doc).unwrap();
+        let bytes = generate_docx_bytes_with_base(&doc, None).unwrap();
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
         let mut doc_xml_file = archive.by_name("word/document.xml").unwrap();

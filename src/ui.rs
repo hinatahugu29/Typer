@@ -15,7 +15,7 @@ use eframe::egui::{
     text::{CCursor, CCursorRange},
 };
 
-use crate::docx_export::generate_docx_bytes;
+use crate::docx_export::generate_docx_bytes_with_base;
 use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{
@@ -660,7 +660,8 @@ impl TyperApp {
             .save_file()
         {
             let doc = parse_document(&self.markdown_text);
-            match generate_docx_bytes(&doc) {
+            let base = self.base_dir();
+            match generate_docx_bytes_with_base(&doc, base.as_deref()) {
                 Ok(bytes) => match std::fs::write(&path, bytes) {
                     Ok(()) => {
                         self.status_message =
