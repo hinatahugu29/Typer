@@ -923,6 +923,116 @@ impl TyperApp {
             }
         }
     }
+
+    /// 見出しアウトラインパネルを描画する（クリックで該当見出しへジャンプ）
+    fn draw_outline_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("outline_panel")
+            .resizable(true)
+            .default_size(200.0)
+            .size_range(140.0..=420.0)
+            .show(ui, |ui| {
+                ui.label(RichText::new("🗂 アウトライン").strong().small());
+                ui.separator();
+                let headings = extract_headings_outline(&self.markdown_text);
+                if headings.is_empty() {
+                    ui.label(RichText::new("見出しがありません").small().weak());
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("outline_scroll")
+                        .show(ui, |ui| {
+                            for (level, title, char_idx) in headings {
+                                let indent = (level.saturating_sub(1)) as f32 * 12.0;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(indent);
+                                    if ui.small_button(&title).clicked() {
+                                        self.cursor_char_range = Some((char_idx, char_idx));
+                                        self.pending_cursor_selection = Some((char_idx, char_idx));
+                                    }
+                                });
+                            }
+                        });
+                }
+            });
+    }
+
+    /// 検索・置換バーを描画する（一致件数表示・前後ジャンプ・個別/一括置換）
+    fn draw_find_replace_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(241, 243, 244))
+            .inner_margin(6.0)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("🔍 検索:").small());
+                    let find_resp = ui.add(
+                        TextEdit::singleline(&mut self.find_query)
+                            .desired_width(160.0)
+                            .hint_text("検索語句..."),
+                    );
+                    let matches = self.find_matches();
+                    let match_count = matches.len();
+                    if find_resp.changed() {
+                        self.current_match_index = 0;
+                        if match_count > 0 {
+                            self.select_find_match(0);
+                        }
+                    }
+
+                    ui.label(RichText::new(format!("{match_count} 件")).small().weak());
+
+                    if ui
+                        .checkbox(&mut self.find_ignore_case, "Aa")
+                        .on_hover_text("大文字・小文字を区別しない")
+                        .changed()
+                    {
+                        self.current_match_index = 0;
+                    }
+
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("◀ 前へ").small())
+                        .clicked()
+                    {
+                        let prev = if self.current_match_index == 0 {
+                            match_count.saturating_sub(1)
+                        } else {
+                            self.current_match_index - 1
+                        };
+                        self.select_find_match(prev);
+                    }
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("次へ ▶").small())
+                        .clicked()
+                    {
+                        self.select_find_match(self.current_match_index + 1);
+                    }
+
+                    ui.separator();
+                    ui.label(RichText::new("置換:").small());
+                    ui.add(
+                        TextEdit::singleline(&mut self.replace_text)
+                            .desired_width(150.0)
+                            .hint_text("置換後の語句..."),
+                    );
+
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("置換").small())
+                        .clicked()
+                    {
+                        self.replace_current_match();
+                    }
+                    if ui
+                        .add_enabled(match_count > 0, egui::Button::new("すべて置換").small())
+                        .clicked()
+                    {
+                        self.replace_all_matches();
+                    }
+
+                    if ui.small_button("✖").on_hover_text("検索バーを閉じる").clicked() {
+                        self.show_find_replace = false;
+                    }
+                });
+            });
+    }
 }
 
 impl eframe::App for TyperApp {
@@ -1675,34 +1785,7 @@ impl eframe::App for TyperApp {
 
         // 見出しアウトラインパネル（クリックで該当見出しへジャンプ）
         if self.show_outline_panel {
-            egui::Panel::left("outline_panel")
-                .resizable(true)
-                .default_size(200.0)
-                .size_range(140.0..=420.0)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("🗂 アウトライン").strong().small());
-                    ui.separator();
-                    let headings = extract_headings_outline(&self.markdown_text);
-                    if headings.is_empty() {
-                        ui.label(RichText::new("見出しがありません").small().weak());
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .id_salt("outline_scroll")
-                            .show(ui, |ui| {
-                                for (level, title, char_idx) in headings {
-                                    let indent = (level.saturating_sub(1)) as f32 * 12.0;
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(indent);
-                                        if ui.small_button(&title).clicked() {
-                                            self.cursor_char_range = Some((char_idx, char_idx));
-                                            self.pending_cursor_selection =
-                                                Some((char_idx, char_idx));
-                                        }
-                                    });
-                                }
-                            });
-                    }
-                });
+            self.draw_outline_panel(ui);
         }
 
         // 中央（左ペイン）：マークアップエディタ＆クイック挿入バー＆検索置換バー
@@ -1957,84 +2040,7 @@ impl eframe::App for TyperApp {
             // 検索・置換バー
             if self.show_find_replace {
                 ui.separator();
-                egui::Frame::NONE
-                    .fill(Color32::from_rgb(241, 243, 244))
-                    .inner_margin(6.0)
-                    .corner_radius(4.0)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("🔍 検索:").small());
-                            let find_resp = ui.add(
-                                TextEdit::singleline(&mut self.find_query)
-                                    .desired_width(160.0)
-                                    .hint_text("検索語句..."),
-                            );
-                            let matches = self.find_matches();
-                            let match_count = matches.len();
-                            if find_resp.changed() {
-                                self.current_match_index = 0;
-                                if match_count > 0 {
-                                    self.select_find_match(0);
-                                }
-                            }
-
-                            ui.label(RichText::new(format!("{match_count} 件")).small().weak());
-
-                            if ui
-                                .checkbox(&mut self.find_ignore_case, "Aa")
-                                .on_hover_text("大文字・小文字を区別しない")
-                                .changed()
-                            {
-                                self.current_match_index = 0;
-                            }
-
-                            if ui
-                                .add_enabled(match_count > 0, egui::Button::new("◀ 前へ").small())
-                                .clicked()
-                            {
-                                let prev = if self.current_match_index == 0 {
-                                    match_count.saturating_sub(1)
-                                } else {
-                                    self.current_match_index - 1
-                                };
-                                self.select_find_match(prev);
-                            }
-                            if ui
-                                .add_enabled(match_count > 0, egui::Button::new("次へ ▶").small())
-                                .clicked()
-                            {
-                                self.select_find_match(self.current_match_index + 1);
-                            }
-
-                            ui.separator();
-                            ui.label(RichText::new("置換:").small());
-                            ui.add(
-                                TextEdit::singleline(&mut self.replace_text)
-                                    .desired_width(150.0)
-                                    .hint_text("置換後の語句..."),
-                            );
-
-                            if ui
-                                .add_enabled(match_count > 0, egui::Button::new("置換").small())
-                                .clicked()
-                            {
-                                self.replace_current_match();
-                            }
-                            if ui
-                                .add_enabled(
-                                    match_count > 0,
-                                    egui::Button::new("すべて置換").small(),
-                                )
-                                .clicked()
-                            {
-                                self.replace_all_matches();
-                            }
-
-                            if ui.small_button("✖").on_hover_text("検索バーを閉じる").clicked() {
-                                self.show_find_replace = false;
-                            }
-                        });
-                    });
+                self.draw_find_replace_bar(ui);
             }
 
             ui.separator();
