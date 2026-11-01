@@ -284,6 +284,10 @@ fn render_docx_block(
             }
             out.push_str("</w:tblGrid>\n");
 
+            let row_padding_twips = attrs
+                .row_padding
+                .as_deref()
+                .map(|v| length_to_twips(v, 120));
             if !headers.is_empty() {
                 out.push_str("      <w:tr>\n");
                 for i in 0..col_count {
@@ -295,6 +299,7 @@ fn render_docx_block(
                         alignments.get(i).copied().flatten(),
                         true,
                         bg,
+                        row_padding_twips,
                         base_dir,
                         images,
                     );
@@ -311,6 +316,7 @@ fn render_docx_block(
                         alignments.get(i).copied().flatten(),
                         false,
                         None,
+                        row_padding_twips,
                         base_dir,
                         images,
                     );
@@ -396,6 +402,7 @@ fn render_docx_table_cell(
     align: Option<Alignment>,
     is_header: bool,
     header_bg: Option<&str>,
+    row_padding_twips: Option<i64>,
     base_dir: Option<&Path>,
     images: &mut DocxImageCollector,
 ) {
@@ -403,6 +410,11 @@ fn render_docx_table_cell(
     if let Some(bg) = header_bg {
         let safe = sanitize_hex(bg);
         out.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{safe}\"/>"));
+    }
+    if let Some(pad) = row_padding_twips {
+        out.push_str(&format!(
+            "<w:tcMar><w:top w:w=\"{pad}\" w:type=\"dxa\"/><w:bottom w:w=\"{pad}\" w:type=\"dxa\"/></w:tcMar>"
+        ));
     }
     out.push_str("</w:tcPr>\n          <w:p>");
     let jc = match align {
@@ -902,6 +914,16 @@ mod tests {
         assert!(rels_contents.contains("media/image1.png"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_docx_row_padding_attribute_emits_cell_margin_twips() {
+        let doc = parse_document("{row-padding: 14pt}\n| A |\n| :--- |\n| 1 |\n");
+        let mut out = String::new();
+        let mut idx = 0usize;
+        let mut images = DocxImageCollector::default();
+        render_docx_block(&mut out, &doc.blocks[0], &mut idx, None, &mut images);
+        assert!(out.contains("<w:tcMar><w:top w:w=\"280\" w:type=\"dxa\"/><w:bottom w:w=\"280\" w:type=\"dxa\"/></w:tcMar>"));
     }
 
     #[test]

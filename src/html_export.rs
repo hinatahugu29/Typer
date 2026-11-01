@@ -362,6 +362,10 @@ fn render_html_block(
                 }
                 out.push_str("  </colgroup>\n");
             }
+            let row_padding_css = attrs
+                .row_padding
+                .as_ref()
+                .map(|p| format!("padding-top: {0}; padding-bottom: {0}", html_escape(p)));
             if !headers.is_empty() {
                 let header_bg_style = attrs
                     .header_bg
@@ -370,8 +374,10 @@ fn render_html_block(
                     .unwrap_or_default();
                 let _ = write!(out, "  <thead>\n    <tr{header_bg_style}>\n");
                 for (i, cell) in headers.iter().enumerate() {
-                    let align_style = cell_align_attr(alignments.get(i).copied().flatten());
-                    let _ = write!(out, "      <th{align_style}>");
+                    let align = alignments.get(i).copied().flatten();
+                    let style_attr =
+                        combine_cell_style_attr(cell_align_css(align), row_padding_css.as_deref());
+                    let _ = write!(out, "      <th{style_attr}>");
                     render_html_inlines(out, cell, base_dir);
                     out.push_str("</th>\n");
                 }
@@ -382,7 +388,7 @@ fn render_html_block(
                 out.push_str("    <tr>\n");
                 for (i, cell) in row.iter().enumerate() {
                     let align = alignments.get(i).copied().flatten();
-                    render_html_table_cell(out, cell, align, base_dir);
+                    render_html_table_cell(out, cell, align, base_dir, row_padding_css.as_deref());
                 }
                 out.push_str("    </tr>\n");
             }
@@ -537,21 +543,22 @@ fn block_style_attr(attrs: &BlockAttributes) -> String {
     }
 }
 
-fn cell_align_attr(align: Option<Alignment>) -> &'static str {
-    match align {
-        Some(Alignment::Left) => " style=\"text-align: left\"",
-        Some(Alignment::Center) => " style=\"text-align: center\"",
-        Some(Alignment::Right) => " style=\"text-align: right\"",
-        None => "",
-    }
-}
-
 fn cell_align_css(align: Option<Alignment>) -> Option<&'static str> {
     match align {
         Some(Alignment::Left) => Some("text-align: left"),
         Some(Alignment::Center) => Some("text-align: center"),
         Some(Alignment::Right) => Some("text-align: right"),
         None => None,
+    }
+}
+
+/// 複数のCSS断片（配置・余白など）を1つの `style="..."` 属性にまとめる（すべて空なら空文字列）
+fn combine_cell_style_attr(a: Option<&str>, b: Option<&str>) -> String {
+    let css = [a, b].into_iter().flatten().collect::<Vec<_>>().join("; ");
+    if css.is_empty() {
+        String::new()
+    } else {
+        format!(" style=\"{css}\"")
     }
 }
 
@@ -562,6 +569,7 @@ fn render_html_table_cell(
     cell: &[Inline],
     align: Option<Alignment>,
     base_dir: Option<&Path>,
+    row_padding_css: Option<&str>,
 ) {
     if let [Inline::Styled { content, style }] = cell {
         if let Some(bg) = &style.bg {
@@ -575,19 +583,20 @@ fn render_html_table_cell(
                     style: remaining_style,
                 }]
             };
-            let mut css = format!("background-color: {}", sanitize_color_hex(bg));
-            if let Some(align_css) = cell_align_css(align) {
-                css.push_str("; ");
-                css.push_str(align_css);
-            }
+            let bg_css = format!("background-color: {}", sanitize_color_hex(bg));
+            let css = [Some(bg_css.as_str()), cell_align_css(align), row_padding_css]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
             let _ = write!(out, "      <td style=\"{css}\">");
             render_html_inlines(out, &cell_content, base_dir);
             out.push_str("</td>\n");
             return;
         }
     }
-    let align_style = cell_align_attr(align);
-    let _ = write!(out, "      <td{align_style}>");
+    let style_attr = combine_cell_style_attr(cell_align_css(align), row_padding_css);
+    let _ = write!(out, "      <td{style_attr}>");
     render_html_inlines(out, cell, base_dir);
     out.push_str("</td>\n");
 }
@@ -861,6 +870,18 @@ mod tests {
         let doc = parse_document("{header-bg: #fdf0e6}\n| A |\n| :--- |\n| 1 |\n");
         let html = generate_html(&doc);
         assert!(html.contains("<tr style=\"background-color: #fdf0e6\">"));
+    }
+
+    #[test]
+    fn test_table_row_padding_attribute_emits_cell_padding_style() {
+        let doc = parse_document("{row-padding: 14pt}\n| A |\n| :--- |\n| 1 |\n");
+        let html = generate_html(&doc);
+        assert!(
+            html.contains("<th style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">")
+        );
+        assert!(
+            html.contains("<td style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">")
+        );
     }
 
     #[test]

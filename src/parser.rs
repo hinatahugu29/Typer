@@ -797,6 +797,7 @@ fn is_standalone_block_attr_line(trimmed: &str) -> bool {
                 | "color"
                 | "c"
                 | "header-bg"
+                | "row-padding"
                 | "block-width"
                 | "indent"
                 | "indent-left"
@@ -860,6 +861,11 @@ fn parse_block_attributes_into(attr_str: &str, attrs: &mut BlockAttributes) {
                 "header-bg" => {
                     if let Some(c) = normalize_color(val) {
                         attrs.header_bg = Some(c);
+                    }
+                }
+                "row-padding" => {
+                    if !val.is_empty() {
+                        attrs.row_padding = Some(val.to_string());
                     }
                 }
                 "block-width" => {

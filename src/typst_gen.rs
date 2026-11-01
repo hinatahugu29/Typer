@@ -299,6 +299,11 @@ fn render_table(
         );
     }
 
+    if let Some(row_padding) = &attrs.row_padding {
+        let safe_padding = sanitize_length(row_padding, "6pt");
+        let _ = writeln!(table_code, "  inset: (x: 7pt, y: {safe_padding}),");
+    }
+
     if !headers.is_empty() {
         table_code.push_str("  table.header(");
         for cell in headers.iter().take(col_count) {

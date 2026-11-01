@@ -99,6 +99,8 @@ pub struct BlockAttributes {
     pub color: Option<String>,
     /// 表のヘッダー行の背景色上書き（表ブロックのみ使用。例: "#fdf0e6"）
     pub header_bg: Option<String>,
+    /// 表のセル内上下余白の上書き（表ブロックのみ使用。行の高さに見えるゆとりを調整する。例: "12pt", "4mm"）
+    pub row_padding: Option<String>,
     /// 引用ブロックを左バー付きの塗りつぶしではなく、全周を罫線で囲んだボックス表示にする
     pub boxed: bool,
     /// ブロック単位の表示幅（表以外の見出し・段落・引用などに使用。例: "60%", "100mm"）
@@ -117,6 +119,7 @@ impl BlockAttributes {
             && self.font_size.is_none()
             && self.color.is_none()
             && self.header_bg.is_none()
+            && self.row_padding.is_none()
             && !self.boxed
             && self.block_width.is_none()
             && self.indent_left.is_none()
