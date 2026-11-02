@@ -1942,6 +1942,13 @@ impl eframe::App for TyperApp {
                     );
                 }
                 if ui
+                    .small_button("📏 行高さ指定")
+                    .on_hover_text("直前の表に行の上下パディング（セル内余白）指定を挿入します")
+                    .clicked()
+                {
+                    self.insert_at_cursor("\n{row-padding: 14pt}\n");
+                }
+                if ui
                     .small_button("➡ 右寄せ段落")
                     .on_hover_text("カーソル位置に日付・署名向けの右寄せ属性を挿入します (Ctrl+Alt+R)")
                     .clicked()
