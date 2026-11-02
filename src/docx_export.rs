@@ -9,7 +9,9 @@
 use std::io::{Cursor, Write};
 use std::path::Path;
 
-use crate::model::{Alignment, Block, Document, FontChoice, Inline, InlineStyle, Orientation};
+use crate::model::{
+    Alignment, Block, Document, DocumentSettings, FontChoice, Inline, InlineStyle, Orientation,
+};
 use crate::typst_gen::resolve_local_image_path;
 
 /// 埋め込み対象として採用したローカル画像1件分のデータ
@@ -24,9 +26,53 @@ struct EmbeddedImage {
 #[derive(Default)]
 struct DocxImageCollector {
     images: Vec<EmbeddedImage>,
+    /// 数式を本文と同じフォント・文字サイズで画像化するために使う
+    settings: DocumentSettings,
 }
 
 impl DocxImageCollector {
+    fn push_image(&mut self, content_type: &'static str, ext: &str, bytes: Vec<u8>) -> String {
+        let index = self.images.len() + 1;
+        let relationship_id = format!("rIdImg{index}");
+        self.images.push(EmbeddedImage {
+            relationship_id: relationship_id.clone(),
+            file_name: format!("image{index}.{ext}"),
+            content_type,
+            bytes,
+        });
+        relationship_id
+    }
+
+    /// 数式をPNG画像として登録し、その画像を本文に置くランXMLを返す。組版できなければ `None`
+    fn register_math(
+        &mut self,
+        tex: &str,
+        display: bool,
+        style: &RunStyle,
+    ) -> Option<String> {
+        let mut settings = self.settings.clone();
+        // 見出し・`{size: ...}` の中では、その文字サイズで組む
+        if let Some(half_pt) = style.size_half_pt {
+            settings.font_size = format!("{}pt", half_pt as f64 / 2.0);
+        }
+        let color = style.color.as_ref().map(|c| format!("#{c}"));
+        let source = crate::typst_gen::math_snippet_source(tex, display, &settings, color.as_deref());
+        let math = crate::typst_engine::render_math(&source)?;
+        let rel_id = self.push_image("image/png", "png", math.png.clone());
+        let delim = if display { "$$" } else { "$" };
+        let alt = format!("{delim}{}{delim}", tex.trim());
+        // 画像の下端がベースラインに来るため、ベースラインより下にはみ出す分だけ下げる
+        let lower_half_pt = (math.depth_pt * 2.0).round() as i64;
+        Some(drawing_run_xml(
+            &rel_id,
+            self.images.len(),
+            pt_to_emu(math.width_pt),
+            pt_to_emu(math.height_pt),
+            &alt,
+            (!display && lower_half_pt > 0).then_some(-lower_half_pt),
+        ))
+    }
+
     /// ローカル画像を読み込んで登録し、本文から参照するための relationship ID を返す。
     /// 読み込めない画像（リンク切れ・SVG/WebP等の非対応形式・外部URL）は `None` を返す。
     fn register(&mut self, url: &str, base_dir: Option<&Path>) -> Option<(String, u32, u32)> {
@@ -44,18 +90,27 @@ impl DocxImageCollector {
             _ => return None, // SVG/WebP等はWordのレガシーメディア形式として非対応
         };
         let (px_w, px_h) = probe_image_pixel_size(&bytes, &ext).unwrap_or((400, 300));
-
-        let index = self.images.len() + 1;
-        let relationship_id = format!("rIdImg{index}");
-        let file_name = format!("image{index}.{}", if ext == "jpg" { "jpeg" } else { &ext });
-        self.images.push(EmbeddedImage {
-            relationship_id: relationship_id.clone(),
-            file_name,
-            content_type,
-            bytes,
-        });
+        let ext = if ext == "jpg" { "jpeg".to_string() } else { ext };
+        let relationship_id = self.push_image(content_type, &ext, bytes);
         Some((relationship_id, px_w, px_h))
     }
+}
+
+fn is_display_math_only(content: &[Inline]) -> bool {
+    let mut has_display = false;
+    for inline in content {
+        match inline {
+            Inline::Math { display: true, .. } => has_display = true,
+            Inline::SoftBreak | Inline::HardBreak => {}
+            Inline::Text(t) if t.trim().is_empty() => {}
+            _ => return false,
+        }
+    }
+    has_display
+}
+
+fn pt_to_emu(pt: f64) -> i64 {
+    (pt * 12700.0).round() as i64
 }
 
 /// PNG/JPEG/GIFのヘッダーからピクセルサイズを読み取る（ファイル全体のデコードは行わない軽量実装）
@@ -118,7 +173,10 @@ fn probe_jpeg_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// 内部文書モデルから .docx ファイルのバイト列を生成する（相対パス画像の解決基準ディレクトリ付き）
 pub fn generate_docx_bytes_with_base(doc: &Document, base_dir: Option<&Path>) -> Result<Vec<u8>, String> {
-    let mut images = DocxImageCollector::default();
+    let mut images = DocxImageCollector {
+        settings: doc.settings.clone(),
+        ..Default::default()
+    };
     let body_xml = render_docx_body(&doc.blocks, base_dir, &mut images);
     let document_xml = wrap_document_xml(&doc, &body_xml);
     build_docx_zip(&document_xml, &styles_xml(doc), &images.images)
@@ -256,10 +314,16 @@ fn render_docx_block(
         }
         Block::Paragraph { content, attrs } => {
             let ind = indent_ind_attr(attrs);
-            if ind.is_empty() {
+            // `$$...$$` だけの段落は、PDFと同じく独立した数式として中央に置く
+            let jc = if is_display_math_only(content) {
+                "<w:jc w:val=\"center\"/>"
+            } else {
+                ""
+            };
+            if ind.is_empty() && jc.is_empty() {
                 out.push_str("    <w:p>");
             } else {
-                out.push_str(&format!("    <w:p><w:pPr>{ind}</w:pPr>"));
+                out.push_str(&format!("    <w:p><w:pPr>{jc}{ind}</w:pPr>"));
             }
             render_docx_runs(out, content, RunStyle::default(), base_dir, images);
             out.push_str("</w:p>\n");
@@ -419,6 +483,8 @@ fn indent_ind_attr(attrs: &crate::model::BlockAttributes) -> String {
     s
 }
 
+const DEFAULT_CELL_PADDING_TWIPS: i64 = 80;
+
 fn render_docx_table_cell(
     out: &mut String,
     cell: Option<&Vec<Inline>>,
@@ -434,11 +500,12 @@ fn render_docx_table_cell(
         let safe = sanitize_hex(bg);
         out.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{safe}\"/>"));
     }
-    if let Some(pad) = row_padding_twips {
-        out.push_str(&format!(
-            "<w:tcMar><w:top w:w=\"{pad}\" w:type=\"dxa\"/><w:bottom w:w=\"{pad}\" w:type=\"dxa\"/></w:tcMar>"
-        ));
-    }
+    // Wordのセルは既定で上下の余白が0のため、背の高い数式画像などが罫線に接してしまう。
+    // PDF/HTMLの表と同じく、指定がなくても少し（4pt）空ける
+    let pad = row_padding_twips.unwrap_or(DEFAULT_CELL_PADDING_TWIPS);
+    out.push_str(&format!(
+        "<w:tcMar><w:top w:w=\"{pad}\" w:type=\"dxa\"/><w:bottom w:w=\"{pad}\" w:type=\"dxa\"/></w:tcMar>"
+    ));
     out.push_str("</w:tcPr>\n          <w:p>");
     let jc = match align {
         Some(Alignment::Center) => "<w:pPr><w:jc w:val=\"center\"/></w:pPr>",
@@ -530,13 +597,17 @@ fn collect_runs(
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push(RunItem::Text(t.clone(), style.clone())),
-            // Wordの数式（OMML）には変換せず、LaTeX記法のまま等幅で出す
-            Inline::Math { tex, display } => {
-                let delim = if *display { "$$" } else { "$" };
-                let mut s = style.clone();
-                s.monospace = true;
-                out.push(RunItem::Text(format!("{delim}{tex}{delim}"), s));
-            }
+            // Wordの数式（OMML）ではなく、PDFと同じTypstで組んだPNG画像として埋め込む
+            Inline::Math { tex, display } => match images.register_math(tex, *display, &style) {
+                Some(xml) => out.push(RunItem::Drawing(xml)),
+                None => {
+                    // 組版できなかった数式は、元の記法のまま等幅で出す
+                    let delim = if *display { "$$" } else { "$" };
+                    let mut s = style.clone();
+                    s.monospace = true;
+                    out.push(RunItem::Text(format!("{delim}{tex}{delim}"), s));
+                }
+            },
             Inline::Code(t) => {
                 let mut s = style.clone();
                 s.monospace = true;
@@ -575,6 +646,7 @@ fn collect_runs(
                     Some((rel_id, px_w, px_h)) => {
                         out.push(RunItem::Drawing(render_docx_image_drawing(
                             &rel_id,
+                            images.images.len(),
                             px_w,
                             px_h,
                             width.as_deref(),
@@ -597,6 +669,7 @@ fn collect_runs(
 /// 指定がなければ元画像のピクセルサイズをそのまま96dpi換算で採用する（過度に大きい場合は既定最大幅に収める）。
 fn render_docx_image_drawing(
     rel_id: &str,
+    drawing_id: usize,
     px_w: u32,
     px_h: u32,
     width_attr: Option<&str>,
@@ -622,17 +695,32 @@ fn render_docx_image_drawing(
     };
     let height_emu = width_emu * aspect;
     let (width_emu, height_emu) = (width_emu.round() as i64, height_emu.round() as i64);
+    drawing_run_xml(rel_id, drawing_id, width_emu, height_emu, alt, None)
+}
 
+/// 画像1枚を置くランXML。`drawing_id` は文書内で一意な番号（重複するとWordが修復を求めることがある）。
+/// `position_half_pt` を指定すると、ランをその分だけ上下にずらす（負で下げる）
+fn drawing_run_xml(
+    rel_id: &str,
+    drawing_id: usize,
+    width_emu: i64,
+    height_emu: i64,
+    alt: &str,
+    position_half_pt: Option<i64>,
+) -> String {
     let escaped_alt = xml_escape(alt);
+    let run_props = position_half_pt
+        .map(|p| format!("<w:rPr><w:position w:val=\"{p}\"/></w:rPr>"))
+        .unwrap_or_default();
     format!(
-        "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" \
+        "<w:r>{run_props}<w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" \
 xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">\
 <wp:extent cx=\"{width_emu}\" cy=\"{height_emu}\"/>\
-<wp:docPr id=\"0\" name=\"{escaped_alt}\" descr=\"{escaped_alt}\"/>\
+<wp:docPr id=\"{drawing_id}\" name=\"{escaped_alt}\" descr=\"{escaped_alt}\"/>\
 <a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
 <a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
 <pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
-<pic:nvPicPr><pic:cNvPr id=\"0\" name=\"{escaped_alt}\"/><pic:cNvPicPr/></pic:nvPicPr>\
+<pic:nvPicPr><pic:cNvPr id=\"{drawing_id}\" name=\"{escaped_alt}\"/><pic:cNvPicPr/></pic:nvPicPr>\
 <pic:blipFill><a:blip r:embed=\"{rel_id}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/>\
 <a:stretch><a:fillRect/></a:stretch></pic:blipFill>\
 <pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{width_emu}\" cy=\"{height_emu}\"/></a:xfrm>\
@@ -836,6 +924,27 @@ mod tests {
         let styles = read_docx_part(&doc, "word/styles.xml");
         assert!(styles.contains("Evil&quot;&amp;&lt;font&gt;"));
         assert!(!styles.contains(r#"Evil"&<font>"#));
+    }
+
+    #[test]
+    fn test_math_is_embedded_as_png_with_unique_drawing_ids() {
+        let doc = parse_document("文中 $x^2$ と $\\frac{1}{2}$\n\n$$\n\\sqrt{2}\n$$\n");
+        let bytes = generate_docx_bytes_with_base(&doc, None).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        for i in 1..=3 {
+            assert!(names.contains(&format!("word/media/image{i}.png")), "{names:?}");
+        }
+        let document = read_docx_part(&doc, "word/document.xml");
+        assert!(document.contains(r#"descr="$x^2$""#));
+        assert!(document.contains(r#"<w:position w:val="-"#), "inline math is lowered to the baseline");
+        assert!(document.contains(r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>"#));
+        for id in 1..=3 {
+            assert_eq!(document.matches(&format!(r#"<wp:docPr id="{id}""#)).count(), 1);
+        }
+        assert!(!document.contains(r#"<wp:docPr id="0""#));
     }
 
     #[test]

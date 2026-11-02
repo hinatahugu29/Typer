@@ -4,7 +4,8 @@
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, FontChoice, Inline, InlineStyle, Orientation,
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, Orientation,
 };
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -29,29 +30,7 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     let font_size = sanitize_length(&s.font_size, "10.5pt");
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
     let accent = sanitize_color_hex(&s.accent_color);
-
-    let base_fonts = match &s.font_choice {
-        FontChoice::Gothic => {
-            r#""BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic""#.to_string()
-        }
-        FontChoice::Mincho => {
-            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#
-                .to_string()
-        }
-        FontChoice::Custom(name) => {
-            let safe_name = sanitize_typst_string_literal(name);
-            format!(r#""{safe_name}", "Yu Gothic", "Meiryo""#)
-        }
-    };
-    // 欧文フォントは `covers: "latin-in-cjk"` で英数字だけに限定する。こうしないと
-    // 日本語グリフも持つフォント（HackGen等）を欧文用に指定した際に和文まで奪ってしまう
-    let font_list = match s.latin_font.as_deref().map(str::trim) {
-        Some(latin) if !latin.is_empty() => {
-            let safe_latin = sanitize_typst_string_literal(latin);
-            format!(r#"((name: "{safe_latin}", covers: "latin-in-cjk"), {base_fonts})"#)
-        }
-        _ => format!("({base_fonts})"),
-    };
+    let font_list = font_list_for(s);
 
     let header_footer_params = page_header_footer_params(
         s.header_text.as_deref(),
@@ -125,6 +104,59 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     }
 
     out
+}
+
+/// 数式1つだけを、余白0・サイズ自動のページとして組むTypstソース。
+/// HTML/Word出力で数式を画像化するために使う（フォント・文字サイズは本文と揃える）
+pub fn math_snippet_source(
+    tex: &str,
+    display: bool,
+    settings: &DocumentSettings,
+    color: Option<&str>,
+) -> String {
+    let body = crate::math::latex_to_typst(tex);
+    let font_list = font_list_for(settings);
+    let font_size = sanitize_length(&settings.font_size, "10.5pt");
+    let fill = color
+        .map(|c| format!(", fill: rgb(\"{}\")", sanitize_color_hex(c)))
+        .unwrap_or_default();
+    // 行内数式は `box` で包む。行の枠は親の枠へ展開されてベースライン情報が消えるが、
+    // box は独立した枠として残り、ベースライン（行内での揃え位置）を保持するため
+    let equation = if display {
+        format!("$ {body} $")
+    } else {
+        format!("#box(${body}$)")
+    };
+    format!(
+        // 行の高さは既定だと「キャップハイト〜ベースライン」で、分母や下付き文字など
+        // ベースラインより下の部分が画像の外に切れてしまうため、字形の外形（bounds）に合わせる
+        "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(font: {font_list}, size: {font_size}, lang: \"ja\", region: \"JP\", top-edge: \"bounds\", bottom-edge: \"bounds\"{fill})\n{equation}\n"
+    )
+}
+
+fn font_list_for(s: &DocumentSettings) -> String {
+    let base_fonts = match &s.font_choice {
+        FontChoice::Gothic => {
+            r#""BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic""#.to_string()
+        }
+        FontChoice::Mincho => {
+            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#
+                .to_string()
+        }
+        FontChoice::Custom(name) => {
+            let safe_name = sanitize_typst_string_literal(name);
+            format!(r#""{safe_name}", "Yu Gothic", "Meiryo""#)
+        }
+    };
+    // 欧文フォントは `covers: "latin-in-cjk"` で英数字だけに限定する。こうしないと
+    // 日本語グリフも持つフォント（HackGen等）を欧文用に指定した際に和文まで奪ってしまう
+    match s.latin_font.as_deref().map(str::trim) {
+        Some(latin) if !latin.is_empty() => {
+            let safe_latin = sanitize_typst_string_literal(latin);
+            format!(r#"((name: "{safe_latin}", covers: "latin-in-cjk"), {base_fonts})"#)
+        }
+        _ => format!("({base_fonts})"),
+    }
 }
 
 fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {

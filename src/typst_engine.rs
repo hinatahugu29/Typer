@@ -4,13 +4,15 @@
 //! Windowsの日本語システムフォントをプロセス起動時に一度だけ読み込んで共有キャッシュ（`OnceLock`）し、
 //! `Source::replace` による差分更新と `comemo` のキャッシュ機構を活用して高速なプレビューとPDF出力を実現する。
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use typst::WorldExt;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Scalar};
@@ -136,6 +138,54 @@ pub fn available_latin_font_families() -> Vec<String> {
     names
 }
 
+/// HTML/Word出力に埋め込むための、数式1つ分の画像
+pub struct RenderedMath {
+    pub svg: String,
+    pub png: Vec<u8>,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    /// ベースラインより下にはみ出す量（行内数式を本文の文字と揃える `vertical-align` 用）
+    pub depth_pt: f64,
+}
+
+/// Word用PNGの解像度（3px/pt ≒ 216dpi。印刷でも粗さが目立たない程度）
+const MATH_PNG_PIXEL_PER_PT: f64 = 3.0;
+
+static MATH_CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<RenderedMath>>>>> = OnceLock::new();
+
+/// 数式1つ分のTypstソースを画像化する。組版に失敗した場合は `None`（呼び出し側で元の記法を出す）。
+/// 同じ数式が文書内で繰り返し出てくることが多いため、ソース文字列ごとに結果を覚えておく
+pub fn render_math(source: &str) -> Option<Arc<RenderedMath>> {
+    let cache = MATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok()?.get(source) {
+        return hit.clone();
+    }
+    let rendered = TypstEngine::new().render_math_uncached(source).map(Arc::new);
+    // 全フォント走査の完了前に組んだ結果は、フォントが足りない可能性があるので覚えない
+    if FULL_RESOURCES.get().is_some() {
+        if let Ok(mut map) = cache.lock() {
+            map.insert(source.to_string(), rendered.clone());
+        }
+    }
+    rendered
+}
+
+/// 枠の中で最初に見つかる、ベースラインを持つ入れ子の枠（`box` 等）のベースライン位置
+fn first_group_baseline(frame: &Frame, offset: Point) -> Option<Abs> {
+    for (pos, item) in frame.items() {
+        if let FrameItem::Group(group) = item {
+            let at = offset + *pos;
+            if group.frame.has_baseline() {
+                return Some(at.y + group.frame.baseline());
+            }
+            if let Some(found) = first_group_baseline(&group.frame, at) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Typst の `World` トレイト実装
 pub struct TypstEngine {
     library: Arc<LazyHash<Library>>,
@@ -218,6 +268,30 @@ impl TypstEngine {
 
         let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
         Ok(PreviewOutput { pages, compile_ms })
+    }
+
+    /// 数式1つ分のTypstソース（`typst_gen::math_snippet_source`）を組み、SVGとPNGにする
+    fn render_math_uncached(&mut self, source: &str) -> Option<RenderedMath> {
+        let doc = self.compile_document(source).ok()?;
+        let page = doc.pages().first()?;
+        let size = page.frame.size();
+        let baseline = first_group_baseline(&page.frame, Point::zero()).unwrap_or(size.y);
+        let svg = typst_svg::svg(page, &typst_svg::SvgOptions::default());
+        let pixmap = typst_render::render(
+            page,
+            &RenderOptions {
+                pixel_per_pt: Scalar::new(MATH_PNG_PIXEL_PER_PT),
+                render_bleed: false,
+            },
+        );
+        let png = pixmap.encode_png().ok()?;
+        Some(RenderedMath {
+            svg,
+            png,
+            width_pt: size.x.to_pt(),
+            height_pt: size.y.to_pt(),
+            depth_pt: (size.y - baseline).to_pt().max(0.0),
+        })
     }
 
     /// PDFバイナリをメモリ上で生成して返す
@@ -554,6 +628,28 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "failed to compile:\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn test_render_math_measures_baseline_for_inline_alignment() {
+        let settings = crate::model::DocumentSettings::default();
+        let measure = |tex: &str| {
+            render_math(&crate::typst_gen::math_snippet_source(tex, false, &settings, None))
+                .unwrap_or_else(|| panic!("{tex} should render"))
+        };
+        let x = measure("x");
+        let frac = measure(r"\frac{1}{2}");
+        let sub = measure("x_1");
+        eprintln!(
+            "x: h={:.2} d={:.2} / frac: h={:.2} d={:.2} / sub: h={:.2} d={:.2}",
+            x.height_pt, x.depth_pt, frac.height_pt, frac.depth_pt, sub.height_pt, sub.depth_pt
+        );
+        // 下にはみ出す量は、ベースラインより下に伸びる分母・下付き文字のぶん大きくなる
+        assert!(x.depth_pt < x.height_pt);
+        assert!(frac.depth_pt > x.depth_pt);
+        assert!(sub.depth_pt > x.depth_pt);
+        assert!(frac.svg.starts_with("<svg"));
+        assert!(frac.png.starts_with(b"\x89PNG"));
     }
 
     #[test]

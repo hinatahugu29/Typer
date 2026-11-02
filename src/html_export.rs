@@ -3,7 +3,9 @@
 //! ページ境界（改ページ指定等）に依存しない、ブラウザ上で読みやすいHTML+CSSを生成する。
 //! ローカル画像が存在する場合はBase64データURIとしてHTML内に直接埋め込み、単一ファイルで完結させる。
 
-use crate::model::{Alignment, Block, BlockAttributes, Document, FontChoice, Inline, InlineStyle};
+use crate::model::{
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
+};
 use crate::typst_gen::resolve_local_image_path;
 use std::fmt::Write;
 use std::path::Path;
@@ -13,8 +15,23 @@ pub fn generate_html(doc: &Document) -> String {
     generate_html_with_base(doc, None)
 }
 
+/// 描画中ずっと同じ値を各関数へ受け渡すための文脈
+#[derive(Clone, Copy)]
+struct Ctx<'a> {
+    base_dir: Option<&'a Path>,
+    /// 数式を本文と同じフォント・文字サイズで画像化するために使う
+    settings: &'a DocumentSettings,
+    /// `[...]{red}` 等の内側にいるときの文字色（数式画像の色に使う）
+    color: Option<&'a str>,
+}
+
 pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> String {
     let mut body = String::with_capacity(4096);
+    let ctx = Ctx {
+        base_dir,
+        settings: &doc.settings,
+        color: None,
+    };
 
     let toc_entries = collect_toc_entries(&doc.blocks);
     let mut heading_counter = 0usize;
@@ -22,7 +39,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
         render_html_block(
             &mut body,
             block,
-            base_dir,
+            ctx,
             &toc_entries,
             &mut heading_counter,
         );
@@ -179,6 +196,10 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     margin: 0.8em 0;
     white-space: pre-wrap;
   }}
+  img.math-img {{
+    display: inline;
+    max-width: 100%;
+  }}
   figure.doc-image {{
     margin: 1.2em 0;
     text-align: center;
@@ -304,7 +325,7 @@ fn render_doc_header_footer(class_name: &str, text: Option<&str>) -> String {
 fn render_html_block(
     out: &mut String,
     block: &Block,
-    base_dir: Option<&Path>,
+    ctx: Ctx<'_>,
     toc_entries: &[TocEntry],
     heading_counter: &mut usize,
 ) {
@@ -322,13 +343,13 @@ fn render_html_block(
                 .unwrap_or_default();
             *heading_counter += 1;
             let _ = write!(out, "<h{lvl} id=\"{id}\"{style}>");
-            render_html_inlines(out, content, base_dir);
+            render_html_inlines(out, content, ctx);
             let _ = writeln!(out, "</h{lvl}>");
         }
         Block::Paragraph { content, attrs } => {
             let style = block_style_attr(attrs);
             let _ = write!(out, "<p{style}>");
-            render_html_inlines(out, content, base_dir);
+            render_html_inlines(out, content, ctx);
             let _ = writeln!(out, "</p>");
         }
         Block::List {
@@ -345,7 +366,7 @@ fn render_html_block(
             }
             for item in items {
                 out.push_str("  <li>");
-                render_html_inlines(out, item, base_dir);
+                render_html_inlines(out, item, ctx);
                 out.push_str("</li>\n");
             }
             if *ordered {
@@ -399,7 +420,7 @@ fn render_html_block(
                     let style_attr =
                         combine_cell_style_attr(cell_align_css(align), row_padding_css.as_deref());
                     let _ = write!(out, "      <th{style_attr}>");
-                    render_html_inlines(out, cell, base_dir);
+                    render_html_inlines(out, cell, ctx);
                     out.push_str("</th>\n");
                 }
                 out.push_str("    </tr>\n  </thead>\n");
@@ -409,7 +430,7 @@ fn render_html_block(
                 out.push_str("    <tr>\n");
                 for (i, cell) in row.iter().enumerate() {
                     let align = alignments.get(i).copied().flatten();
-                    render_html_table_cell(out, cell, align, base_dir, row_padding_css.as_deref());
+                    render_html_table_cell(out, cell, align, ctx, row_padding_css.as_deref());
                 }
                 out.push_str("    </tr>\n");
             }
@@ -424,7 +445,7 @@ fn render_html_block(
             };
             let _ = writeln!(out, "<blockquote{class_attr}{style}>");
             for b in blocks {
-                render_html_block(out, b, base_dir, toc_entries, heading_counter);
+                render_html_block(out, b, ctx, toc_entries, heading_counter);
             }
             out.push_str("</blockquote>\n");
         }
@@ -463,7 +484,7 @@ fn render_html_block(
                 "<div style=\"column-count: {safe_count}; column-gap: 2rem;\">"
             );
             for b in blocks {
-                render_html_block(out, b, base_dir, toc_entries, heading_counter);
+                render_html_block(out, b, ctx, toc_entries, heading_counter);
             }
             out.push_str("</div>\n");
         }
@@ -589,7 +610,7 @@ fn render_html_table_cell(
     out: &mut String,
     cell: &[Inline],
     align: Option<Alignment>,
-    base_dir: Option<&Path>,
+    ctx: Ctx<'_>,
     row_padding_css: Option<&str>,
 ) {
     if let [Inline::Styled { content, style }] = cell {
@@ -611,48 +632,76 @@ fn render_html_table_cell(
                 .collect::<Vec<_>>()
                 .join("; ");
             let _ = write!(out, "      <td style=\"{css}\">");
-            render_html_inlines(out, &cell_content, base_dir);
+            render_html_inlines(out, &cell_content, ctx);
             out.push_str("</td>\n");
             return;
         }
     }
     let style_attr = combine_cell_style_attr(cell_align_css(align), row_padding_css);
     let _ = write!(out, "      <td{style_attr}>");
-    render_html_inlines(out, cell, base_dir);
+    render_html_inlines(out, cell, ctx);
     out.push_str("</td>\n");
 }
 
-fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>) {
+/// 数式はPDFと同じTypstで組んだSVGを `<img>` として埋め込む（JavaScript不要・1ファイルで完結）。
+/// SVGをHTMLへ直接書くと、数式ごとに同じIDの字形定義が重複して衝突するため、データURIにする。
+/// 独立行の数式も段落 `<p>` の中に来るので、`<div>` ではなく block表示の `<span>` で包む。
+fn render_html_math(out: &mut String, tex: &str, display: bool, ctx: Ctx<'_>) {
+    let source = crate::typst_gen::math_snippet_source(tex, display, ctx.settings, ctx.color);
+    let delim = if display { "$$" } else { "$" };
+    let alt = html_escape(&format!("{delim}{}{delim}", tex.trim()));
+    let Some(math) = crate::typst_engine::render_math(&source) else {
+        // 組版できなかった数式は、元の記法のまま等幅で示す
+        let class = if display { "math math-display" } else { "math" };
+        let _ = write!(out, r#"<span class="{class}">{alt}</span>"#);
+        return;
+    };
+    let src = format!("data:image/svg+xml;base64,{}", encode_base64(math.svg.as_bytes()));
+    // 本文の文字サイズで組んだ画像を、周りの文字に対する比率（em）で置く。
+    // こうすると見出しなど文字の大きい箇所では、数式も同じ比率で大きくなる
+    let base_pt = parse_pt(&ctx.settings.font_size).unwrap_or(10.5);
+    let em = |pt: f64| pt / base_pt;
+    let size = format!(
+        "width: {:.3}em; height: {:.3}em",
+        em(math.width_pt),
+        em(math.height_pt)
+    );
+    if display {
+        let _ = write!(
+            out,
+            r#"<span class="math-display"><img class="math-img" src="{src}" alt="{alt}" style="{size}"></span>"#
+        );
+    } else {
+        let _ = write!(
+            out,
+            r#"<img class="math-img" src="{src}" alt="{alt}" style="{size}; vertical-align: -{:.3}em">"#,
+            em(math.depth_pt)
+        );
+    }
+}
+
+fn parse_pt(raw: &str) -> Option<f64> {
+    raw.trim().strip_suffix("pt")?.trim().parse().ok().filter(|v: &f64| *v > 0.0)
+}
+
+fn render_html_inlines(out: &mut String, inlines: &[Inline], ctx: Ctx<'_>) {
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push_str(&html_escape(t)),
-            // HTMLでは数式組版を行わず、LaTeX記法のまま等幅で示す
-            // 独立行の数式も段落 `<p>` の中に来るため、`<div>` ではなく block表示の `<span>` にする
-            Inline::Math { tex, display } => {
-                let (class, delim) = if *display {
-                    ("math math-display", "$$")
-                } else {
-                    ("math", "$")
-                };
-                let _ = write!(
-                    out,
-                    r#"<span class="{class}">{delim}{}{delim}</span>"#,
-                    html_escape(tex.trim())
-                );
-            }
+            Inline::Math { tex, display } => render_html_math(out, tex, *display, ctx),
             Inline::Strong(c) => {
                 out.push_str("<strong>");
-                render_html_inlines(out, c, base_dir);
+                render_html_inlines(out, c, ctx);
                 out.push_str("</strong>");
             }
             Inline::Emphasis(c) => {
                 out.push_str("<em>");
-                render_html_inlines(out, c, base_dir);
+                render_html_inlines(out, c, ctx);
                 out.push_str("</em>");
             }
             Inline::Strikethrough(c) => {
                 out.push_str("<del>");
-                render_html_inlines(out, c, base_dir);
+                render_html_inlines(out, c, ctx);
                 out.push_str("</del>");
             }
             Inline::Code(code) => {
@@ -672,17 +721,22 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                 if style.underline {
                     css.push("text-decoration: underline".to_string());
                 }
+                // 数式は画像なので周りの文字色を引き継がない。色付けの中では、その色で画像を作る
+                let inner_ctx = Ctx {
+                    color: style.color.as_deref().or(ctx.color),
+                    ..ctx
+                };
                 if css.is_empty() {
-                    render_html_inlines(out, content, base_dir);
+                    render_html_inlines(out, content, inner_ctx);
                 } else {
                     let _ = write!(out, "<span style=\"{}\">", css.join("; "));
-                    render_html_inlines(out, content, base_dir);
+                    render_html_inlines(out, content, inner_ctx);
                     out.push_str("</span>");
                 }
             }
             Inline::Link { text, url } => {
                 let _ = write!(out, "<a href=\"{}\">", html_escape(url));
-                render_html_inlines(out, text, base_dir);
+                render_html_inlines(out, text, ctx);
                 out.push_str("</a>");
             }
             Inline::Image {
@@ -697,7 +751,7 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
                     .as_ref()
                     .map(|w| format!(" style=\"width: {}; max-width: 100%;\"", html_escape(w)))
                     .unwrap_or_default();
-                let src_attr = if let Some(resolved) = resolve_local_image_path(url, base_dir) {
+                let src_attr = if let Some(resolved) = resolve_local_image_path(url, ctx.base_dir) {
                     if let Ok(bytes) = std::fs::read(&resolved) {
                         let mime = match resolved
                             .extension()
@@ -819,13 +873,18 @@ mod tests {
     }
 
     #[test]
-    fn test_math_is_styled_and_display_math_does_not_nest_div_in_p() {
+    fn test_math_is_embedded_as_svg_image_and_display_math_does_not_nest_div_in_p() {
         let html = generate_html(&parse_document(
             "文中 $a < b$ の式\n\n$$\n\\frac{1}{2}\n$$\n",
         ));
-        assert!(html.contains(".math {"), "math needs a style rule");
-        assert!(html.contains(r#"<span class="math">$a &lt; b$</span>"#));
-        assert!(html.contains(r#"<span class="math math-display">$$\frac{1}{2}$$</span>"#));
+        assert!(html.contains(
+            r#"<img class="math-img" src="data:image/svg+xml;base64,"#
+        ));
+        // 画像の代替テキストに元の記法を残す（読み上げ・検索用）
+        assert!(html.contains(r#"alt="$a &lt; b$""#));
+        assert!(html.contains("vertical-align: -"), "inline math must sit on the baseline");
+        assert!(html.contains(r#"<span class="math-display"><img class="math-img""#));
+        assert!(html.contains(r#"alt="$$\frac{1}{2}$$""#));
         assert!(!html.contains("<div class=\"math"));
     }
 
