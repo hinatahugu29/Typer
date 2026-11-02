@@ -117,6 +117,25 @@ pub fn available_font_families() -> Vec<String> {
     names
 }
 
+/// 欧文フォント欄の候補。英大文字・小文字・数字をすべて持つフォントを返す
+/// （和文フォントも欧文グリフを持つため含まれる）。
+pub fn available_latin_font_families() -> Vec<String> {
+    const PROBES: [u32; 3] = ['A' as u32, 'a' as u32, '0' as u32];
+    let shared = get_shared_resources();
+    let mut names: Vec<String> = Vec::new();
+    for (family, ids) in shared.book.families() {
+        let covers = ids
+            .filter_map(|id| shared.book.info(id))
+            .any(|info| PROBES.iter().all(|&p| info.coverage.contains(p)));
+        if covers {
+            names.push(family.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Typst の `World` トレイト実装
 pub struct TypstEngine {
     library: Arc<LazyHash<Library>>,
@@ -419,6 +438,24 @@ mod tests {
             haystack.contains("TimesNewRoman"),
             "Times New Roman should be embedded in the PDF"
         );
+    }
+
+    #[test]
+    fn test_separate_latin_and_japanese_fonts_both_embedded_in_pdf() {
+        let _ = get_shared_resources();
+        let start = Instant::now();
+        while FULL_RESOURCES.get().is_none() && start.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let doc = parse_document(
+            "---\nfont: Yu Mincho\nfont-latin: Times New Roman\n---\n\n報告書 README.md を参照\n",
+        );
+        let pdf = TypstEngine::new()
+            .export_pdf(&generate_typst_source(&doc))
+            .expect("compile with covers: latin-in-cjk should succeed");
+        let haystack = String::from_utf8_lossy(&pdf);
+        assert!(haystack.contains("TimesNewRoman"));
+        assert!(haystack.contains("YuMincho"));
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub struct DocumentSettings {
     pub line_height: f32,
     /// 基本フォント種別（ゴシック / 明朝）
     pub font_choice: FontChoice,
+    /// 欧文（英数字）だけに使うフォント。未指定なら和文フォントの欧文グリフを使う
+    pub latin_font: Option<String>,
     /// 文書全体のアクセントカラー（見出し罫線・表ヘッダ・リンク等に反映。例: "#1a73e8"）
     pub accent_color: String,
     /// 全ページ共通のヘッダー文字列（社名・資料名など。未指定時は非表示）
@@ -71,6 +73,7 @@ impl Default for DocumentSettings {
             font_size: "10.5pt".to_string(),
             line_height: 1.5,
             font_choice: FontChoice::Gothic,
+            latin_font: None,
             accent_color: "#1a73e8".to_string(),
             header_text: None,
             footer_text: None,

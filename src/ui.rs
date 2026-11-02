@@ -22,7 +22,9 @@ use crate::parser::{
     extract_headings_outline, parse_document, update_document_settings_in_markdown,
 };
 use crate::templates::TEMPLATES;
-use crate::typst_engine::{PreviewOutput, TypstEngine, available_font_families};
+use crate::typst_engine::{
+    PreviewOutput, TypstEngine, available_font_families, available_latin_font_families,
+};
 use crate::typst_gen::generate_typst_source_with_base;
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
@@ -34,6 +36,56 @@ use crate::ui_text::{
     byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
     is_valid_hex_color,
 };
+
+/// フォント名の入力欄と、入力中の文字で絞り込んだ候補ポップアップを描画する。値が変わったら `true`。
+///
+/// 開閉状態は `has_focus()` を毎フレーム見るのではなく `open` で保持する。候補をクリックした
+/// 瞬間にテキスト欄が同じフレーム内でフォーカスを失うため、フォーカスで判定すると
+/// ポップアップごと描画されずクリックが届かない。
+fn font_name_input_with_suggestions(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    open: &mut bool,
+    candidates: impl FnOnce() -> Vec<String>,
+    hint: &str,
+) -> bool {
+    let mut changed = false;
+    let response = ui.add(
+        egui::TextEdit::singleline(value)
+            .desired_width(90.0)
+            .hint_text(hint),
+    );
+    changed |= response.changed();
+    if response.gained_focus() {
+        *open = true;
+    }
+    if !*open {
+        return changed;
+    }
+    let query = value.to_ascii_lowercase();
+    let suggestions: Vec<String> = candidates()
+        .into_iter()
+        .filter(|family| query.is_empty() || family.to_ascii_lowercase().contains(&query))
+        .take(8)
+        .collect();
+    if suggestions.is_empty() {
+        *open = false;
+        return changed;
+    }
+    // クリック時は既定の CloseOnClick により `open` が自動で false に戻る
+    egui::Popup::from_response(&response)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .open_bool(open)
+        .show(|ui| {
+            for family in suggestions {
+                if ui.button(&family).clicked() {
+                    *value = family;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
 
 enum WorkerRequest {
     RenderPreview {
@@ -147,6 +199,8 @@ pub struct TyperApp {
     /// テキスト欄がフォーカスを失ったと判定されて同じフレームでポップアップごと描画されなくなり、
     /// クリックが握りつぶされる。そのため開閉状態をこのフィールドで独立管理する
     show_font_suggestions: bool,
+    /// 欧文フォント入力欄の候補ポップアップを表示するか（理由は `show_font_suggestions` と同じ）
+    show_latin_font_suggestions: bool,
     /// 直近にエクスポートしたファイルのパス（「開く」ボタン用）
     last_export_path: Option<PathBuf>,
     /// ダークモード表示が有効か（永続化される）
@@ -253,6 +307,7 @@ impl TyperApp {
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
+            show_latin_font_suggestions: false,
             last_export_path: None,
             dark_mode,
             persist_settings: true,
@@ -1011,49 +1066,29 @@ impl TyperApp {
                         changed = true;
                     }
                     if let FontChoice::Custom(name) = &mut doc_settings.font_choice {
-                        let edit_response = ui.add(
-                            egui::TextEdit::singleline(name)
-                                .desired_width(90.0)
-                                .hint_text("例: Meiryo UI"),
+                        changed |= font_name_input_with_suggestions(
+                            ui,
+                            name,
+                            &mut self.show_font_suggestions,
+                            available_font_families,
+                            "例: Meiryo UI",
                         );
-                        if edit_response.changed() {
-                            changed = true;
-                        }
-                        // 入力欄にフォーカスが入ったタイミングで候補ポップアップを開く。
-                        // 開閉状態は `has_focus()` を毎フレーム見るのではなく専用フィールドで
-                        // 保持する（候補ボタンをクリックした瞬間にテキスト欄がフォーカスを失い、
-                        // 同じフレームで判定すると描画自体がスキップされてクリックが効かなくなるため）
-                        if edit_response.gained_focus() {
-                            self.show_font_suggestions = true;
-                        }
-                        if self.show_font_suggestions {
-                            let query = name.to_ascii_lowercase();
-                            let suggestions: Vec<String> = available_font_families()
-                                .into_iter()
-                                .filter(|family| {
-                                    query.is_empty() || family.to_ascii_lowercase().contains(&query)
-                                })
-                                .take(8)
-                                .collect();
-                            if suggestions.is_empty() {
-                                self.show_font_suggestions = false;
-                            } else {
-                                egui::Popup::from_response(&edit_response)
-                                    .layout(egui::Layout::top_down_justified(egui::Align::Min))
-                                    .open_bool(&mut self.show_font_suggestions)
-                                    .show(|ui| {
-                                        // クリックは `PopupCloseBehavior::CloseOnClick`（既定）により
-                                        // `open_bool` で渡した `show_font_suggestions` が自動的に
-                                        // `false` に戻るため、ここで明示的に閉じる必要はない
-                                        for family in suggestions {
-                                            if ui.button(&family).clicked() {
-                                                *name = family;
-                                                changed = true;
-                                            }
-                                        }
-                                    });
-                            }
-                        }
+                    }
+
+                    ui.label(RichText::new("欧文:").small())
+                        .on_hover_text("英数字だけに使うフォント（例: Times New Roman）。空欄なら和文フォントの英数字をそのまま使います");
+                    let mut latin = doc_settings.latin_font.clone().unwrap_or_default();
+                    if font_name_input_with_suggestions(
+                        ui,
+                        &mut latin,
+                        &mut self.show_latin_font_suggestions,
+                        available_latin_font_families,
+                        "和文と同じ",
+                    ) {
+                        let trimmed = latin.trim();
+                        doc_settings.latin_font =
+                            (!trimmed.is_empty()).then(|| trimmed.to_string());
+                        changed = true;
                     }
 
                     ui.separator();
@@ -2261,6 +2296,7 @@ mod tests {
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
+            show_latin_font_suggestions: false,
             last_export_path: None,
             dark_mode: false,
             persist_settings: false,

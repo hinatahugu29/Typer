@@ -30,18 +30,27 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
     let accent = sanitize_color_hex(&s.accent_color);
 
-    let font_list = match &s.font_choice {
+    let base_fonts = match &s.font_choice {
         FontChoice::Gothic => {
-            r#"("BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic")"#.to_string()
+            r#""BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic""#.to_string()
         }
         FontChoice::Mincho => {
-            r#"("BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic")"#
+            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#
                 .to_string()
         }
         FontChoice::Custom(name) => {
             let safe_name = sanitize_typst_string_literal(name);
-            format!(r#"("{safe_name}", "Yu Gothic", "Meiryo")"#)
+            format!(r#""{safe_name}", "Yu Gothic", "Meiryo""#)
         }
+    };
+    // 欧文フォントは `covers: "latin-in-cjk"` で英数字だけに限定する。こうしないと
+    // 日本語グリフも持つフォント（HackGen等）を欧文用に指定した際に和文まで奪ってしまう
+    let font_list = match s.latin_font.as_deref().map(str::trim) {
+        Some(latin) if !latin.is_empty() => {
+            let safe_latin = sanitize_typst_string_literal(latin);
+            format!(r#"((name: "{safe_latin}", covers: "latin-in-cjk"), {base_fonts})"#)
+        }
+        _ => format!("({base_fonts})"),
     };
 
     let header_footer_params = page_header_footer_params(
@@ -797,6 +806,15 @@ mod tests {
         doc.settings.font_choice = crate::model::FontChoice::Custom("Meiryo UI".to_string());
         let code = generate_typst_source(&doc);
         assert!(code.contains(r#"("Meiryo UI", "Yu Gothic", "Meiryo")"#));
+    }
+
+    #[test]
+    fn test_latin_font_is_prepended_and_limited_to_latin_in_cjk() {
+        let doc = parse_document("---\nfont: mincho\nfont-latin: Times New Roman\n---\n\n本文\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains(
+            r#"font: ((name: "Times New Roman", covers: "latin-in-cjk"), "BIZ UDPMincho""#
+        ));
     }
 
     #[test]

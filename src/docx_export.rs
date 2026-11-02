@@ -121,7 +121,36 @@ pub fn generate_docx_bytes_with_base(doc: &Document, base_dir: Option<&Path>) ->
     let mut images = DocxImageCollector::default();
     let body_xml = render_docx_body(&doc.blocks, base_dir, &mut images);
     let document_xml = wrap_document_xml(&doc, &body_xml);
-    build_docx_zip(&document_xml, &images.images)
+    build_docx_zip(&document_xml, &styles_xml(doc), &images.images)
+}
+
+/// 文書既定フォント（和文=eastAsia、欧文=ascii/hAnsi）を `docDefaults` に定義する
+fn styles_xml(doc: &Document) -> String {
+    let s = &doc.settings;
+    let east_asia = match &s.font_choice {
+        FontChoice::Gothic => "Yu Gothic".to_string(),
+        FontChoice::Mincho => "Yu Mincho".to_string(),
+        FontChoice::Custom(name) if !name.trim().is_empty() => xml_escape(name.trim()),
+        FontChoice::Custom(_) => "Yu Gothic".to_string(),
+    };
+    let latin = match s.latin_font.as_deref().map(str::trim) {
+        Some(latin) if !latin.is_empty() => xml_escape(latin),
+        _ => east_asia.clone(),
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="{latin}" w:hAnsi="{latin}" w:eastAsia="{east_asia}" w:cs="{latin}"/>
+        <w:lang w:val="en-US" w:eastAsia="ja-JP"/>
+      </w:rPr>
+    </w:rPrDefault>
+  </w:docDefaults>
+</w:styles>
+"#
+    )
 }
 
 fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
@@ -131,12 +160,6 @@ fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
         Orientation::Landscape => (16838, 11906), // A4 in twips (横)
     };
     let margin_twips = length_to_twips(&s.margin, 1134); // 既定20mm相当
-    let font_name = match &s.font_choice {
-        FontChoice::Gothic => "Yu Gothic".to_string(),
-        FontChoice::Mincho => "Yu Mincho".to_string(),
-        FontChoice::Custom(name) if !name.trim().is_empty() => xml_escape(name),
-        FontChoice::Custom(_) => "Yu Gothic".to_string(),
-    };
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -145,9 +168,7 @@ fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
 {body_xml}
     <w:sectPr>
       <w:pgSz w:w="{page_w}" w:h="{page_h}"/>
-      <w:pgMar w:top="{margin_twips}" w:right="{margin_twips}" w:bottom="{margin_twips}" w:left="{margin_twips}"/>
-      <w:docDefaultRFonts w:ascii="{font_name}" w:eastAsia="{font_name}"/>
-    </w:sectPr>
+      <w:pgMar w:top="{margin_twips}" w:right="{margin_twips}" w:bottom="{margin_twips}" w:left="{margin_twips}"/>    </w:sectPr>
   </w:body>
 </w:document>
 "#
@@ -702,13 +723,14 @@ fn content_types_xml(images: &[EmbeddedImage]) -> String {
   <Default Extension="xml" ContentType="application/xml"/>
 {image_defaults}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 </Types>
 "#
     )
 }
 
 fn document_rels_xml(images: &[EmbeddedImage]) -> String {
-    let relationships: String = images
+    let mut relationships: Vec<String> = images
         .iter()
         .map(|img| {
             format!(
@@ -716,8 +738,12 @@ fn document_rels_xml(images: &[EmbeddedImage]) -> String {
                 img.relationship_id, img.file_name
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
+    relationships.push(
+        r#"  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#
+            .to_string(),
+    );
+    let relationships = relationships.join("\n");
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -728,7 +754,11 @@ fn document_rels_xml(images: &[EmbeddedImage]) -> String {
     )
 }
 
-fn build_docx_zip(document_xml: &str, images: &[EmbeddedImage]) -> Result<Vec<u8>, String> {
+fn build_docx_zip(
+    document_xml: &str,
+    styles_xml: &str,
+    images: &[EmbeddedImage],
+) -> Result<Vec<u8>, String> {
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
     let options: zip::write::FileOptions<'_, '_, ()> =
@@ -749,17 +779,20 @@ fn build_docx_zip(document_xml: &str, images: &[EmbeddedImage]) -> Result<Vec<u8
     zip.write_all(document_xml.as_bytes())
         .map_err(|e| e.to_string())?;
 
-    if !images.is_empty() {
-        zip.start_file("word/_rels/document.xml.rels", options)
-            .map_err(|e| e.to_string())?;
-        zip.write_all(document_rels_xml(images).as_bytes())
-            .map_err(|e| e.to_string())?;
+    zip.start_file("word/styles.xml", options)
+        .map_err(|e| e.to_string())?;
+    zip.write_all(styles_xml.as_bytes())
+        .map_err(|e| e.to_string())?;
 
-        for img in images {
-            zip.start_file(format!("word/media/{}", img.file_name), options)
-                .map_err(|e| e.to_string())?;
-            zip.write_all(&img.bytes).map_err(|e| e.to_string())?;
-        }
+    zip.start_file("word/_rels/document.xml.rels", options)
+        .map_err(|e| e.to_string())?;
+    zip.write_all(document_rels_xml(images).as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    for img in images {
+        zip.start_file(format!("word/media/{}", img.file_name), options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&img.bytes).map_err(|e| e.to_string())?;
     }
 
     let cursor = zip.finish().map_err(|e| e.to_string())?;
@@ -771,21 +804,21 @@ mod tests {
     use super::*;
     use crate::parser::parse_document;
 
+    fn read_docx_part(doc: &Document, part: &str) -> String {
+        let bytes = generate_docx_bytes_with_base(doc, None).expect("docx generation should succeed");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("valid zip archive");
+        let mut file = archive.by_name(part).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+        s
+    }
+
     #[test]
     fn test_custom_font_choice_empty_name_falls_back_to_yu_gothic() {
         let mut doc = parse_document("本文\n");
         doc.settings.font_choice = crate::model::FontChoice::Custom(String::new());
-        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
-        let cursor = Cursor::new(bytes);
-        let mut archive =
-            zip::ZipArchive::new(cursor).expect("generated bytes should be a valid zip archive");
-        let document_xml = {
-            let mut file = archive.by_name("word/document.xml").unwrap();
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut file, &mut s).unwrap();
-            s
-        };
-        assert!(document_xml.contains(r#"w:ascii="Yu Gothic""#));
+        let styles = read_docx_part(&doc, "word/styles.xml");
+        assert!(styles.contains(r#"w:eastAsia="Yu Gothic""#));
     }
 
     #[test]
@@ -793,18 +826,20 @@ mod tests {
         let mut doc = parse_document("本文\n");
         doc.settings.font_choice =
             crate::model::FontChoice::Custom(r#"Evil"&<font>"#.to_string());
-        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
-        let cursor = Cursor::new(bytes);
-        let mut archive =
-            zip::ZipArchive::new(cursor).expect("generated bytes should be a valid zip archive");
-        let document_xml = {
-            let mut file = archive.by_name("word/document.xml").unwrap();
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut file, &mut s).unwrap();
-            s
-        };
-        assert!(document_xml.contains("Evil&quot;&amp;&lt;font&gt;"));
-        assert!(!document_xml.contains(r#"Evil"&<font>"#));
+        let styles = read_docx_part(&doc, "word/styles.xml");
+        assert!(styles.contains("Evil&quot;&amp;&lt;font&gt;"));
+        assert!(!styles.contains(r#"Evil"&<font>"#));
+    }
+
+    #[test]
+    fn test_latin_font_maps_to_ascii_and_japanese_font_to_east_asia() {
+        let doc = parse_document("---\nfont: mincho\nfont-latin: Times New Roman\n---\n\n本文\n");
+        let styles = read_docx_part(&doc, "word/styles.xml");
+        assert!(styles.contains(
+            r#"w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Yu Mincho""#
+        ));
+        let rels = read_docx_part(&doc, "word/_rels/document.xml.rels");
+        assert!(rels.contains(r#"Target="styles.xml""#));
     }
 
     #[test]

@@ -411,6 +411,9 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
         font,
         settings.accent_color
     );
+    if let Some(latin) = &settings.latin_font {
+        let _ = writeln!(frontmatter, "font-latin: {latin}");
+    }
     if let Some(header) = &settings.header_text {
         let _ = writeln!(frontmatter, "header: {header}");
     }
@@ -593,6 +596,9 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     if let Ok(lh) = val.parse::<f32>() {
                         settings.line_height = lh.clamp(0.8, 4.0);
                     }
+                }
+                "font-latin" | "latin-font" => {
+                    settings.latin_font = (!val.is_empty()).then(|| val.to_string());
                 }
                 "font" | "font-family" => {
                     let v_low = val.to_ascii_lowercase();
@@ -1360,6 +1366,19 @@ mod tests {
                 "font name {name:?} should stay as a distinct custom choice, not collapse to a preset"
             );
         }
+    }
+
+    #[test]
+    fn test_frontmatter_latin_font_roundtrip() {
+        let doc = parse_document("---\nfont: mincho\nfont-latin: Times New Roman\n---\n\n本文\n");
+        assert_eq!(doc.settings.latin_font.as_deref(), Some("Times New Roman"));
+        let regenerated = update_document_settings_in_markdown("---\n---\n\n本文\n", &doc.settings);
+        assert_eq!(
+            parse_document(&regenerated).settings.latin_font.as_deref(),
+            Some("Times New Roman")
+        );
+        assert!(!regenerated.contains("{{"), "should not leak into custom vars");
+        assert!(parse_document(&regenerated).settings.custom_vars.is_empty());
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
             r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#.to_string()
         }
     };
+    let font_family = match s.latin_font.as_deref().map(str::trim) {
+        Some(latin) if !latin.is_empty() => format!(r#""{}", {font_family}"#, html_escape(latin)),
+        _ => font_family,
+    };
     let accent_color = sanitize_color_hex(&s.accent_color);
     let columns_css = if s.columns > 1 {
         format!(
