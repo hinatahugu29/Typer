@@ -80,22 +80,34 @@ pub struct PreviewOutput {
 /// 共有フォントキャッシュに読み込まれている全フォントファミリー名を昇順で返す。
 /// カスタムフォント入力のための候補一覧・絞り込みUIに使う想定（起動時に一度だけ構築されたメモリ上の
 /// `FontBook` を読むだけなので、呼び出しコストは軽い）。
-/// 「ひらがなの『あ』」をカバーしているかどうかで日本語文書に実用的なフォントかを判定する。
-/// Windowsのフォントフォルダには記号専用フォント（Wingdings等）や、
-/// 欧文のみでCJKグリフを一切持たないフォント（Arial, Consolas, DejaVu Sans Mono等）も
-/// 大量に含まれており、それらをカスタムフォント候補に出すと「選んでも見た目が変わらない」
-/// （実際には適用されているが、本文の日本語部分は自動フォールバックでゴシック/明朝のまま
-/// 描画されるため、選択が効いていないように見える）という体感を生む。候補はこの判定で
-/// 絞り込む。
-const JAPANESE_COVERAGE_PROBE_CODEPOINT: u32 = 'あ' as u32;
+/// ひらがな・カタカナ・常用漢字（「報」「文」）をカバーしているかどうかで、業務文書に実用的な
+/// 日本語フォントかを判定する。Windowsのフォントフォルダには記号専用フォント（Wingdings等）や、
+/// 欧文のみでCJKグリフを一切持たないフォント（Arial, Consolas, DejaVu Sans Mono等）も大量に
+/// 含まれており、それらをカスタムフォント候補に出すと「選んでも見た目が変わらない」（実際には
+/// 適用されているが、本文の日本語部分は自動フォールバックでゴシック/明朝のまま描画されるため、
+/// 選択が効いていないように見える）という体感を生む。
+///
+/// ひらがな単体だけでは、かな専用の装飾フォント（漢字グリフを持たない）まで候補に残ってしまい
+/// 「漢字を含む本文はほとんど変わって見えない」という同種の体感を生むため、カタカナ・常用漢字も
+/// 合わせて要求する。また同一ファミリー内でもウェイトによってカバレッジが異なる場合があるため、
+/// 「いずれか1書体がすべての判定文字をカバーしている」ことを条件にする（書体をまたいだ
+/// 部分一致の寄せ集めでは、実際に選ばれる書体が漢字を欠いている可能性が残るため）。
+const JAPANESE_COVERAGE_PROBES: [u32; 4] = [
+    'あ' as u32, // ひらがな
+    'ア' as u32, // カタカナ
+    '報' as u32, // 常用漢字（「報告書」等、業務文書で頻出）
+    '文' as u32, // 常用漢字（「文書」等、画数の少ない基本漢字）
+];
 
 pub fn available_font_families() -> Vec<String> {
     let shared = get_shared_resources();
     let mut names: Vec<String> = Vec::new();
     for (family, ids) in shared.book.families() {
-        let has_japanese_glyphs = ids
-            .filter_map(|id| shared.book.info(id))
-            .any(|info| info.coverage.contains(JAPANESE_COVERAGE_PROBE_CODEPOINT));
+        let has_japanese_glyphs = ids.filter_map(|id| shared.book.info(id)).any(|info| {
+            JAPANESE_COVERAGE_PROBES
+                .iter()
+                .all(|&probe| info.coverage.contains(probe))
+        });
         if has_japanese_glyphs {
             names.push(family.to_string());
         }
