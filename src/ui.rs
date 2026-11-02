@@ -42,6 +42,10 @@ use crate::ui_text::{
 /// 開閉状態は `has_focus()` を毎フレーム見るのではなく `open` で保持する。候補をクリックした
 /// 瞬間にテキスト欄が同じフレーム内でフォーカスを失うため、フォーカスで判定すると
 /// ポップアップごと描画されずクリックが届かない。
+///
+/// egui既定の「どこをクリックしても閉じる」は使わない。それだと入力欄内のクリック（カーソル移動）
+/// でも閉じてしまい、フォーカスが入り直すまで再表示されないため。閉じるのは候補の選択・
+/// Escape・入力欄とポップアップ以外の場所のクリックのときだけにしている。
 fn font_name_input_with_suggestions(
     ui: &mut egui::Ui,
     value: &mut String,
@@ -56,7 +60,7 @@ fn font_name_input_with_suggestions(
             .hint_text(hint),
     );
     changed |= response.changed();
-    if response.gained_focus() {
+    if response.gained_focus() || response.clicked() || response.changed() {
         *open = true;
     }
     if !*open {
@@ -68,22 +72,37 @@ fn font_name_input_with_suggestions(
         .filter(|family| query.is_empty() || family.to_ascii_lowercase().contains(&query))
         .take(8)
         .collect();
+    // 候補0件でも `open` は維持する（文字を消して再び一致すれば、そのまま表示を再開する）
     if suggestions.is_empty() {
-        *open = false;
         return changed;
     }
-    // クリック時は既定の CloseOnClick により `open` が自動で false に戻る
-    egui::Popup::from_response(&response)
+    let mut picked = false;
+    let shown = egui::Popup::from_response(&response)
         .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .open_bool(open)
         .show(|ui| {
             for family in suggestions {
                 if ui.button(&family).clicked() {
                     *value = family;
                     changed = true;
+                    picked = true;
                 }
             }
         });
+    if picked {
+        *open = false;
+    } else if let Some(shown) = shown {
+        let clicked_elsewhere = ui.input(|i| {
+            i.pointer.any_click()
+                && i.pointer.interact_pos().is_some_and(|pos| {
+                    !shown.response.rect.contains(pos) && !response.rect.contains(pos)
+                })
+        });
+        if clicked_elsewhere {
+            *open = false;
+        }
+    }
     changed
 }
 

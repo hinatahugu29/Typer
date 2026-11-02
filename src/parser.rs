@@ -402,18 +402,13 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
 
     let mut frontmatter = format!(
-        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\naccent-color: {}\n",
-        paper,
-        orient,
-        settings.margin,
-        settings.font_size,
-        settings.line_height,
-        font,
-        settings.accent_color
+        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\n",
+        paper, orient, settings.margin, settings.font_size, settings.line_height, font,
     );
     if let Some(latin) = &settings.latin_font {
         let _ = writeln!(frontmatter, "font-latin: {latin}");
     }
+    let _ = writeln!(frontmatter, "accent-color: {}", settings.accent_color);
     if let Some(header) = &settings.header_text {
         let _ = writeln!(frontmatter, "header: {header}");
     }
@@ -1377,7 +1372,10 @@ mod tests {
             parse_document(&regenerated).settings.latin_font.as_deref(),
             Some("Times New Roman")
         );
-        assert!(!regenerated.contains("{{"), "should not leak into custom vars");
+        assert!(
+            regenerated.contains("font: mincho\nfont-latin: Times New Roman\naccent-color:"),
+            "font-latin should sit right after font: {regenerated}"
+        );
         assert!(parse_document(&regenerated).settings.custom_vars.is_empty());
     }
 
