@@ -1024,14 +1024,21 @@ impl TyperApp {
                                 .take(8)
                                 .collect();
                             if !suggestions.is_empty() {
-                                egui::Popup::menu(&edit_response).show(|ui| {
-                                    for family in suggestions {
-                                        if ui.button(&family).clicked() {
-                                            *name = family;
-                                            changed = true;
+                                // `Popup::menu` はボタンの `clicked()` でトグルする前提の作りで、
+                                // 入力欄の再クリック（カーソル移動）のたびに開閉が反転してしまい
+                                // 候補クリックが効かなくなる。ここでは呼び出し自体を
+                                // `has_focus()` で制御しているため、常時オープン想定の
+                                // `Popup::from_response` を使う。
+                                egui::Popup::from_response(&edit_response)
+                                    .layout(egui::Layout::top_down_justified(egui::Align::Min))
+                                    .show(|ui| {
+                                        for family in suggestions {
+                                            if ui.button(&family).clicked() {
+                                                *name = family;
+                                                changed = true;
+                                            }
                                         }
-                                    }
-                                });
+                                    });
                             }
                         }
                     }
