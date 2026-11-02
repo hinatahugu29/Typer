@@ -379,6 +379,25 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_latin_only_font_is_embedded_in_pdf_after_full_scan() {
+        let _ = get_shared_resources();
+        let start = Instant::now();
+        while FULL_RESOURCES.get().is_none() && start.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut doc = parse_document("Hello World 本文\n");
+        doc.settings.font_choice =
+            crate::model::FontChoice::Custom("Times New Roman".to_string());
+        let code = generate_typst_source(&doc);
+        let pdf = TypstEngine::new().export_pdf(&code).expect("pdf");
+        let haystack = String::from_utf8_lossy(&pdf);
+        assert!(
+            haystack.contains("TimesNewRoman"),
+            "Times New Roman should be embedded in the PDF"
+        );
+    }
+
+    #[test]
     fn test_available_font_families_excludes_latin_only_fonts_lacking_japanese_coverage() {
         // Arial/Consolas は決め打ちリストにも含まれる欧文専用フォントで、日本語グリフを
         // 持たない。選ぶと「カスタムフォントを変えたのに本文の日本語部分の見た目が
