@@ -34,8 +34,11 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
             r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#.to_string()
         }
         FontChoice::Mincho => r#""BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif"#.to_string(),
-        FontChoice::Custom(name) => {
+        FontChoice::Custom(name) if !name.trim().is_empty() => {
             format!(r#""{}", "Yu Gothic", sans-serif"#, html_escape(name))
+        }
+        FontChoice::Custom(_) => {
+            r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#.to_string()
         }
     };
     let accent_color = sanitize_color_hex(&s.accent_color);
@@ -784,6 +787,14 @@ mod tests {
     fn test_html_escape_escapes_all_special_chars() {
         assert_eq!(html_escape(r#"<a>&"'"#), "&lt;a&gt;&amp;&quot;&#39;");
         assert_eq!(html_escape("普通の日本語"), "普通の日本語");
+    }
+
+    #[test]
+    fn test_custom_font_choice_empty_name_falls_back_to_gothic_default() {
+        let mut doc = parse_document("本文\n");
+        doc.settings.font_choice = crate::model::FontChoice::Custom(String::new());
+        let html = generate_html(&doc);
+        assert!(html.contains(r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#));
     }
 
     #[test]

@@ -598,10 +598,12 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     let v_low = val.to_ascii_lowercase();
                     if v_low.contains("mincho") || val.contains("明朝") {
                         settings.font_choice = FontChoice::Mincho;
-                    } else if v_low.contains("gothic") || val.contains("ゴシック") || val.is_empty()
-                    {
+                    } else if v_low.contains("gothic") || val.contains("ゴシック") {
                         settings.font_choice = FontChoice::Gothic;
                     } else {
+                        // 空文字列もここに含める：カスタム入力欄を全消去して打ち直している途中の
+                        // 状態であり、ゴシック体に戻してしまうとUIの入力欄自体が消えて
+                        // 再入力できなくなるため、空のカスタム値として保持する
                         settings.font_choice = FontChoice::Custom(val.to_string());
                     }
                 }
@@ -1328,6 +1330,15 @@ mod tests {
             doc.settings.font_choice,
             FontChoice::Custom("Meiryo UI".to_string())
         );
+    }
+
+    #[test]
+    fn test_frontmatter_font_empty_value_stays_custom_instead_of_reverting_to_gothic() {
+        // カスタムフォント入力欄を全消去して打ち直している最中（font: が空）でも
+        // ゴシック体に戻ってUIの入力欄が消えてしまわないことを確認する
+        let src = "---\nfont: \n---\n\n本文\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.settings.font_choice, FontChoice::Custom(String::new()));
     }
 
     #[test]
