@@ -322,9 +322,17 @@ fn load_windows_japanese_fonts_quick() -> Vec<Font> {
 /// 「全部使える必要はないが、使いたい時に使える」を満たすため全走査する。
 fn load_all_windows_fonts() -> Vec<Font> {
     let mut fonts = Vec::new();
-    let font_dir = Path::new(r"C:\Windows\Fonts");
+    // ユーザー単位でインストールしたフォント（「すべてのユーザーにインストール」を選ばなかった場合）は
+    // C:\Windows\Fonts ではなく %LOCALAPPDATA%\Microsoft\Windows\Fonts に入る
+    let mut font_dirs = vec![std::path::PathBuf::from(r"C:\Windows\Fonts")];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        font_dirs.push(Path::new(&local).join(r"Microsoft\Windows\Fonts"));
+    }
 
-    if let Ok(entries) = std::fs::read_dir(font_dir) {
+    for font_dir in &font_dirs {
+        let Ok(entries) = std::fs::read_dir(font_dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let is_font_file = path
