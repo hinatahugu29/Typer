@@ -139,6 +139,13 @@ impl TypstEngine {
 
     /// Typstソース文字列を差分更新してコンパイルし、`PagedDocument` を返す
     fn compile_document(&mut self, typst_code: &str) -> Result<PagedDocument, String> {
+        // プレビュー用ワーカーはエンジンを使い回すため、バックグラウンド全走査の完了後に
+        // ここでフォント集合を差し替えないと、起動直後の決め打ちリストのまま描画され続ける
+        let shared = get_shared_resources();
+        if !Arc::ptr_eq(&self.fonts, &shared.fonts) {
+            self.book = Arc::clone(&shared.book);
+            self.fonts = Arc::clone(&shared.fonts);
+        }
         self.main_source.replace(typst_code);
         let warned = typst::compile::<PagedDocument>(self);
         match warned.output {
@@ -379,17 +386,34 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_latin_only_font_is_embedded_in_pdf_after_full_scan() {
-        let _ = get_shared_resources();
+    fn test_reused_engine_picks_up_full_font_scan_for_latin_only_custom_font() {
+        // プレビュー用ワーカーと同様に、起動直後の決め打ちフォント集合で作ったエンジンを
+        // 使い回しても、全走査完了後はそちらのフォント（Times New Roman）が使われること
+        let quick = QUICK_RESOURCES.get_or_init(|| {
+            build_shared_resources(load_windows_japanese_fonts_quick())
+        });
+        let mut engine = TypstEngine {
+            library: Arc::clone(&quick.library),
+            book: Arc::clone(&quick.book),
+            fonts: Arc::clone(&quick.fonts),
+            main_source: Source::detached(String::new()),
+        };
+        let _ = FULL_SCAN_SPAWNED.get_or_init(|| {
+            std::thread::spawn(|| {
+                let _ = FULL_RESOURCES.set(build_shared_resources(load_all_windows_fonts()));
+            });
+        });
         let start = Instant::now();
         while FULL_RESOURCES.get().is_none() && start.elapsed().as_secs() < 30 {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let mut doc = parse_document("Hello World 本文\n");
+
+        let mut doc = parse_document("このドキュメントは README.md を参照\n");
         doc.settings.font_choice =
             crate::model::FontChoice::Custom("Times New Roman".to_string());
-        let code = generate_typst_source(&doc);
-        let pdf = TypstEngine::new().export_pdf(&code).expect("pdf");
+        let pdf = engine
+            .export_pdf(&generate_typst_source(&doc))
+            .expect("pdf");
         let haystack = String::from_utf8_lossy(&pdf);
         assert!(
             haystack.contains("TimesNewRoman"),
