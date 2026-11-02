@@ -166,6 +166,11 @@
 - [x] **10-2c. 和文・欧文フォントの個別指定** — `font-latin` / ページ設定バーの「欧文:」欄。Typstでは `covers: "latin-in-cjk"` で英数字に限定、DOCXでは `styles.xml` の `docDefaults` に ascii/eastAsia を分けて設定
 - [ ] **10-3. 任意のTTF/OTFファイルをプロジェクト単位で指定** — フロントマターで `font-file: <パス>` のように同梱・外部フォントファイルを直接読み込めるようにする
 
+## Milestone 11：数式
+- [x] **11-1. `$...$` / `$$...$$` の数式対応** — pulldown-cmarkの `ENABLE_MATH` で認識し、LaTeX記法を自前の軽量変換器（`src/math.rs`）でTypst数式記法へ変換。未知のコマンドは文字列に落としてコンパイルエラーを防ぐ。金額表記（`$100`）はPandoc同様の規則で除外
+- [ ] **11-2.（需要次第）変換範囲の拡大** — 行列・場合分け（`\begin{pmatrix}` `\begin{cases}`）等。必要になったら mitex 等の本格的な変換器の採用を検討
+- [ ] **11-3.（需要次第）HTML/Word での数式表示** — HTMLはMathML、WordはOMMLへの変換
+
 ---
 
 ## 直近のネクストアクション（作業を始める際の手順）

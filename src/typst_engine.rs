@@ -540,6 +540,23 @@ mod tests {
     }
 
     #[test]
+    fn test_every_supported_latex_command_compiles_in_typst() {
+        // 1つでも未定義の識別子が出ると文書全体のプレビューが壊れるため、対応表の全エントリを
+        // 行内・独立行の両方で個別にコンパイルして確かめる
+        let mut engine = TypstEngine::new();
+        let mut failures = Vec::new();
+        for tex in crate::math::all_supported_samples() {
+            for md in [format!("本文 ${tex}$ 本文\n"), format!("$$\n{tex}\n$$\n")] {
+                let code = generate_typst_source(&parse_document(&md));
+                if let Err(e) = engine.export_pdf(&code) {
+                    failures.push(format!("{tex:?} -> {}: {e}", crate::math::latex_to_typst(&tex)));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "failed to compile:\n{}", failures.join("\n"));
+    }
+
+    #[test]
     fn test_math_notation_renders_without_error() {
         // typst-assetsのNewCMMathフォント追加後、数式記法（ギリシャ文字・分数・総和等）を
         // 含む文書がエラーなく組版できることを確認する（実際のグリフ表示は目視確認済み）

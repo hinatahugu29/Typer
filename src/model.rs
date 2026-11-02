@@ -224,6 +224,11 @@ pub enum Inline {
         /// float時の垂直方向オフセット（例: "-5mm"）。基準は現在のカーソル（段落）位置
         offset_y: Option<String>,
     },
+    /// `$...$`（行内）/ `$$...$$`（独立行）の数式。中身はLaTeX記法のまま保持する
+    Math {
+        tex: String,
+        display: bool,
+    },
     SoftBreak,
     HardBreak,
 }

@@ -615,6 +615,16 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push_str(&html_escape(t)),
+            // HTMLでは数式組版を行わず、LaTeX記法のまま等幅で示す
+            Inline::Math { tex, display } => {
+                let tag = if *display { "div" } else { "span" };
+                let delim = if *display { "$$" } else { "$" };
+                let _ = write!(
+                    out,
+                    r#"<{tag} class="math">{delim}{}{delim}</{tag}>"#,
+                    html_escape(tex)
+                );
+            }
             Inline::Strong(c) => {
                 out.push_str("<strong>");
                 render_html_inlines(out, c, base_dir);

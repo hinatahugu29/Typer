@@ -530,6 +530,13 @@ fn collect_runs(
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push(RunItem::Text(t.clone(), style.clone())),
+            // Wordの数式（OMML）には変換せず、LaTeX記法のまま等幅で出す
+            Inline::Math { tex, display } => {
+                let delim = if *display { "$$" } else { "$" };
+                let mut s = style.clone();
+                s.monospace = true;
+                out.push(RunItem::Text(format!("{delim}{tex}{delim}"), s));
+            }
             Inline::Code(t) => {
                 let mut s = style.clone();
                 s.monospace = true;

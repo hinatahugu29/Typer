@@ -34,6 +34,7 @@ pub fn parse_document(input: &str) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_MATH);
 
     let parser = Parser::new_ext(&preprocessed, options);
 
@@ -60,7 +61,7 @@ pub fn parse_document(input: &str) -> Document {
 
     let mut in_columns: Option<(u8, Vec<Block>)> = None;
 
-    for event in parser {
+    for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -354,6 +355,16 @@ pub fn parse_document(input: &str) -> Document {
             Event::Code(code) => {
                 current_inlines.push(Inline::Code(code.to_string()));
             }
+            Event::InlineMath(tex) => {
+                let followed_by_digit = preprocessed[range.end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit());
+                current_inlines.push(math_or_literal_dollars(&tex, false, followed_by_digit));
+            }
+            Event::DisplayMath(tex) => {
+                current_inlines.push(math_or_literal_dollars(&tex, true, false));
+            }
             Event::SoftBreak => {
                 if in_paragraph || in_heading.is_some() {
                     current_inlines.push(Inline::SoftBreak);
@@ -432,11 +443,26 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     frontmatter
 }
 
+/// `$100 と $200` のような金額表記を数式と誤認識しないよう、Pandocと同じく
+/// 開き `$` の直後・閉じ `$` の直前が空白の場合や、閉じ `$` の直後が数字の場合は
+/// 数式とみなさず、元の文字列に戻す
+/// （独立行の `$$ ... $$` は中に空白があるのが普通なので対象外）
+fn math_or_literal_dollars(tex: &str, display: bool, followed_by_digit: bool) -> Inline {
+    let padded = tex.starts_with(char::is_whitespace) || tex.ends_with(char::is_whitespace);
+    if !display && (padded || followed_by_digit) {
+        return Inline::Text(format!("${tex}$"));
+    }
+    Inline::Math {
+        tex: tex.to_string(),
+        display,
+    }
+}
+
 pub(crate) fn inlines_to_plain_text(inlines: &[Inline]) -> String {
     let mut s = String::new();
     for inline in inlines {
         match inline {
-            Inline::Text(t) | Inline::Code(t) => s.push_str(t),
+            Inline::Text(t) | Inline::Code(t) | Inline::Math { tex: t, .. } => s.push_str(t),
             Inline::Strong(c)
             | Inline::Emphasis(c)
             | Inline::Strikethrough(c)
@@ -1360,6 +1386,35 @@ mod tests {
                 FontChoice::Custom(name.to_string()),
                 "font name {name:?} should stay as a distinct custom choice, not collapse to a preset"
             );
+        }
+    }
+
+    fn first_paragraph(src: &str) -> Vec<Inline> {
+        match parse_document(src).blocks.into_iter().next() {
+            Some(Block::Paragraph { content, .. }) => content,
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_inline_and_display_math_are_recognized() {
+        let inline = first_paragraph(r"問1 $4 \times 6 + 18 =$");
+        assert!(inline.contains(&Inline::Math {
+            tex: r"4 \times 6 + 18 =".to_string(),
+            display: false
+        }));
+        let display = first_paragraph("$$\n\\frac{1}{2}\n$$\n");
+        assert!(display
+            .iter()
+            .any(|i| matches!(i, Inline::Math { display: true, tex } if tex.contains(r"\frac{1}{2}"))));
+    }
+
+    #[test]
+    fn test_money_amounts_are_not_treated_as_math() {
+        for src in ["価格は $100 と $200 です", "価格は$100と$200です", "$5 and $10"] {
+            let content = parse_document(src).blocks;
+            let has_math = format!("{content:?}").contains("Math");
+            assert!(!has_math, "{src:?} should stay plain text: {content:?}");
         }
     }
 

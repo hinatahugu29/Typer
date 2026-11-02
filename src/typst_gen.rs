@@ -436,6 +436,18 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
             Inline::Text(t) => {
                 escape_typst_text(out, t);
             }
+            Inline::Math { tex, display } => {
+                let body = crate::math::latex_to_typst(tex);
+                if body.trim().is_empty() {
+                    continue;
+                }
+                // Typstは `$ ... $`（内側に空白）を独立行の数式、`$...$` を行内数式として扱う
+                if *display {
+                    let _ = write!(out, "$ {body} $");
+                } else {
+                    let _ = write!(out, "${body}$");
+                }
+            }
             Inline::Strong(children) => {
                 out.push_str("#strong[");
                 render_inlines(out, children, base_dir);
