@@ -168,6 +168,17 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     border-radius: 3px;
     font-family: Consolas, monospace;
   }}
+  .math {{
+    font-family: Consolas, monospace;
+    font-size: 0.95em;
+    color: #3c4043;
+  }}
+  .math-display {{
+    display: block;
+    text-align: center;
+    margin: 0.8em 0;
+    white-space: pre-wrap;
+  }}
   figure.doc-image {{
     margin: 1.2em 0;
     text-align: center;
@@ -616,13 +627,17 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&P
         match inline {
             Inline::Text(t) => out.push_str(&html_escape(t)),
             // HTMLでは数式組版を行わず、LaTeX記法のまま等幅で示す
+            // 独立行の数式も段落 `<p>` の中に来るため、`<div>` ではなく block表示の `<span>` にする
             Inline::Math { tex, display } => {
-                let tag = if *display { "div" } else { "span" };
-                let delim = if *display { "$$" } else { "$" };
+                let (class, delim) = if *display {
+                    ("math math-display", "$$")
+                } else {
+                    ("math", "$")
+                };
                 let _ = write!(
                     out,
-                    r#"<{tag} class="math">{delim}{}{delim}</{tag}>"#,
-                    html_escape(tex)
+                    r#"<span class="{class}">{delim}{}{delim}</span>"#,
+                    html_escape(tex.trim())
                 );
             }
             Inline::Strong(c) => {
@@ -801,6 +816,17 @@ mod tests {
     fn test_html_escape_escapes_all_special_chars() {
         assert_eq!(html_escape(r#"<a>&"'"#), "&lt;a&gt;&amp;&quot;&#39;");
         assert_eq!(html_escape("普通の日本語"), "普通の日本語");
+    }
+
+    #[test]
+    fn test_math_is_styled_and_display_math_does_not_nest_div_in_p() {
+        let html = generate_html(&parse_document(
+            "文中 $a < b$ の式\n\n$$\n\\frac{1}{2}\n$$\n",
+        ));
+        assert!(html.contains(".math {"), "math needs a style rule");
+        assert!(html.contains(r#"<span class="math">$a &lt; b$</span>"#));
+        assert!(html.contains(r#"<span class="math math-display">$$\frac{1}{2}$$</span>"#));
+        assert!(!html.contains("<div class=\"math"));
     }
 
     #[test]
