@@ -54,6 +54,21 @@ pub struct PreviewOutput {
     pub compile_ms: f64,
 }
 
+/// 共有フォントキャッシュに読み込まれている全フォントファミリー名を昇順で返す。
+/// カスタムフォント入力のための候補一覧・絞り込みUIに使う想定（起動時に一度だけ構築されたメモリ上の
+/// `FontBook` を読むだけなので、呼び出しコストは軽い）。
+pub fn available_font_families() -> Vec<String> {
+    let shared = get_shared_resources();
+    let mut names: Vec<String> = shared
+        .book
+        .families()
+        .map(|(family, _)| family.to_string())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Typst の `World` トレイト実装
 pub struct TypstEngine {
     library: Arc<LazyHash<Library>>,
@@ -252,6 +267,21 @@ mod tests {
     use crate::parser::parse_document;
     use crate::sample::SAMPLE_DOCUMENT;
     use crate::typst_gen::generate_typst_source;
+
+    #[test]
+    fn test_available_font_families_includes_known_japanese_fonts_sorted_and_deduped() {
+        let families = available_font_families();
+        assert!(!families.is_empty());
+        let mut sorted = families.clone();
+        sorted.sort();
+        assert_eq!(families, sorted, "families should be sorted");
+        let unique_count = {
+            let mut s = families.clone();
+            s.dedup();
+            s.len()
+        };
+        assert_eq!(unique_count, families.len(), "families should be deduped");
+    }
 
     #[test]
     fn test_compile_error_includes_generated_code_line_number() {

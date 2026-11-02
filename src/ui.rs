@@ -22,7 +22,7 @@ use crate::parser::{
     extract_headings_outline, parse_document, update_document_settings_in_markdown,
 };
 use crate::templates::TEMPLATES;
-use crate::typst_engine::{PreviewOutput, TypstEngine};
+use crate::typst_engine::{PreviewOutput, TypstEngine, available_font_families};
 use crate::typst_gen::generate_typst_source_with_base;
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
@@ -1005,15 +1005,34 @@ impl TyperApp {
                         changed = true;
                     }
                     if let FontChoice::Custom(name) = &mut doc_settings.font_choice {
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(name)
-                                    .desired_width(90.0)
-                                    .hint_text("例: Meiryo UI"),
-                            )
-                            .changed()
-                        {
+                        let edit_response = ui.add(
+                            egui::TextEdit::singleline(name)
+                                .desired_width(90.0)
+                                .hint_text("例: Meiryo UI"),
+                        );
+                        if edit_response.changed() {
                             changed = true;
+                        }
+                        // 入力欄がフォーカスされている間、導入済みフォント名から絞り込み候補を表示する
+                        if edit_response.has_focus() || edit_response.gained_focus() {
+                            let query = name.to_ascii_lowercase();
+                            let suggestions: Vec<String> = available_font_families()
+                                .into_iter()
+                                .filter(|family| {
+                                    query.is_empty() || family.to_ascii_lowercase().contains(&query)
+                                })
+                                .take(8)
+                                .collect();
+                            if !suggestions.is_empty() {
+                                egui::Popup::menu(&edit_response).show(|ui| {
+                                    for family in suggestions {
+                                        if ui.button(&family).clicked() {
+                                            *name = family;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                            }
                         }
                     }
 
