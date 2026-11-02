@@ -80,13 +80,26 @@ pub struct PreviewOutput {
 /// 共有フォントキャッシュに読み込まれている全フォントファミリー名を昇順で返す。
 /// カスタムフォント入力のための候補一覧・絞り込みUIに使う想定（起動時に一度だけ構築されたメモリ上の
 /// `FontBook` を読むだけなので、呼び出しコストは軽い）。
+/// 「ひらがなの『あ』」をカバーしているかどうかで日本語文書に実用的なフォントかを判定する。
+/// Windowsのフォントフォルダには記号専用フォント（Wingdings等）や、
+/// 欧文のみでCJKグリフを一切持たないフォント（Arial, Consolas, DejaVu Sans Mono等）も
+/// 大量に含まれており、それらをカスタムフォント候補に出すと「選んでも見た目が変わらない」
+/// （実際には適用されているが、本文の日本語部分は自動フォールバックでゴシック/明朝のまま
+/// 描画されるため、選択が効いていないように見える）という体感を生む。候補はこの判定で
+/// 絞り込む。
+const JAPANESE_COVERAGE_PROBE_CODEPOINT: u32 = 'あ' as u32;
+
 pub fn available_font_families() -> Vec<String> {
     let shared = get_shared_resources();
-    let mut names: Vec<String> = shared
-        .book
-        .families()
-        .map(|(family, _)| family.to_string())
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    for (family, ids) in shared.book.families() {
+        let has_japanese_glyphs = ids
+            .filter_map(|id| shared.book.info(id))
+            .any(|info| info.coverage.contains(JAPANESE_COVERAGE_PROBE_CODEPOINT));
+        if has_japanese_glyphs {
+            names.push(family.to_string());
+        }
+    }
     names.sort();
     names.dedup();
     names
@@ -343,6 +356,23 @@ mod tests {
         let full = load_all_windows_fonts();
         assert!(!quick.is_empty());
         assert!(full.len() >= quick.len());
+    }
+
+    #[test]
+    fn test_available_font_families_excludes_latin_only_fonts_lacking_japanese_coverage() {
+        // Arial/Consolas は決め打ちリストにも含まれる欧文専用フォントで、日本語グリフを
+        // 持たない。選ぶと「カスタムフォントを変えたのに本文の日本語部分の見た目が
+        // 変わらない」という体感を生むため、候補からは除外されるべき
+        let families = available_font_families();
+        let lower: Vec<String> = families.iter().map(|f| f.to_ascii_lowercase()).collect();
+        assert!(
+            !lower.iter().any(|f| f.contains("arial")),
+            "Arial should not appear in Japanese-capable suggestions: {families:?}"
+        );
+        assert!(
+            !lower.iter().any(|f| f.contains("consolas")),
+            "Consolas should not appear in Japanese-capable suggestions: {families:?}"
+        );
     }
 
     #[test]
