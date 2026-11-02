@@ -142,6 +142,11 @@ pub struct TyperApp {
     show_outline_panel: bool,
     /// カスタム文字色入力欄（HEXコード）
     custom_color_hex: String,
+    /// カスタムフォント名入力欄の候補ポップアップを表示するか。
+    /// `TextEdit` の `has_focus()` を毎フレーム直接条件にすると、候補ボタンをクリックした瞬間に
+    /// テキスト欄がフォーカスを失ったと判定されて同じフレームでポップアップごと描画されなくなり、
+    /// クリックが握りつぶされる。そのため開閉状態をこのフィールドで独立管理する
+    show_font_suggestions: bool,
     /// 直近にエクスポートしたファイルのパス（「開く」ボタン用）
     last_export_path: Option<PathBuf>,
     /// ダークモード表示が有効か（永続化される）
@@ -247,6 +252,7 @@ impl TyperApp {
             last_autosave_time: Instant::now(),
             show_outline_panel: false,
             custom_color_hex: String::new(),
+            show_font_suggestions: false,
             last_export_path: None,
             dark_mode,
             persist_settings: true,
@@ -1013,8 +1019,14 @@ impl TyperApp {
                         if edit_response.changed() {
                             changed = true;
                         }
-                        // 入力欄がフォーカスされている間、導入済みフォント名から絞り込み候補を表示する
-                        if edit_response.has_focus() || edit_response.gained_focus() {
+                        // 入力欄にフォーカスが入ったタイミングで候補ポップアップを開く。
+                        // 開閉状態は `has_focus()` を毎フレーム見るのではなく専用フィールドで
+                        // 保持する（候補ボタンをクリックした瞬間にテキスト欄がフォーカスを失い、
+                        // 同じフレームで判定すると描画自体がスキップされてクリックが効かなくなるため）
+                        if edit_response.gained_focus() {
+                            self.show_font_suggestions = true;
+                        }
+                        if self.show_font_suggestions {
                             let query = name.to_ascii_lowercase();
                             let suggestions: Vec<String> = available_font_families()
                                 .into_iter()
@@ -1023,15 +1035,16 @@ impl TyperApp {
                                 })
                                 .take(8)
                                 .collect();
-                            if !suggestions.is_empty() {
-                                // `Popup::menu` はボタンの `clicked()` でトグルする前提の作りで、
-                                // 入力欄の再クリック（カーソル移動）のたびに開閉が反転してしまい
-                                // 候補クリックが効かなくなる。ここでは呼び出し自体を
-                                // `has_focus()` で制御しているため、常時オープン想定の
-                                // `Popup::from_response` を使う。
+                            if suggestions.is_empty() {
+                                self.show_font_suggestions = false;
+                            } else {
                                 egui::Popup::from_response(&edit_response)
                                     .layout(egui::Layout::top_down_justified(egui::Align::Min))
+                                    .open_bool(&mut self.show_font_suggestions)
                                     .show(|ui| {
+                                        // クリックは `PopupCloseBehavior::CloseOnClick`（既定）により
+                                        // `open_bool` で渡した `show_font_suggestions` が自動的に
+                                        // `false` に戻るため、ここで明示的に閉じる必要はない
                                         for family in suggestions {
                                             if ui.button(&family).clicked() {
                                                 *name = family;
@@ -2247,6 +2260,7 @@ mod tests {
             last_autosave_time: Instant::now(),
             show_outline_panel: false,
             custom_color_hex: String::new(),
+            show_font_suggestions: false,
             last_export_path: None,
             dark_mode: false,
             persist_settings: false,
