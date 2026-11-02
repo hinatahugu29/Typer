@@ -596,9 +596,14 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                 }
                 "font" | "font-family" => {
                     let v_low = val.to_ascii_lowercase();
-                    if v_low.contains("mincho") || val.contains("明朝") {
+                    // 完全一致のみをプリセットとして扱う（`.contains()` だと「BIZ UDGothic」
+                    // 「MS Gothic」「Yu Gothic」など "gothic" を名前に含む実在のフォント名を
+                    // すべてゴシック体プリセットに丸められてしまい、カスタムで選んだ特定の
+                    // フォントが無視されてプリセット側の優先順位（BIZ UDPGothic優先）に
+                    // 強制的に差し替わってしまう。明朝側の "mincho" / "明朝" も同様）
+                    if v_low == "mincho" || val == "明朝" || val == "明朝体" {
                         settings.font_choice = FontChoice::Mincho;
-                    } else if v_low.contains("gothic") || val.contains("ゴシック") {
+                    } else if v_low == "gothic" || val == "ゴシック" || val == "ゴシック体" {
                         settings.font_choice = FontChoice::Gothic;
                     } else {
                         // 空文字列もここに含める：カスタム入力欄を全消去して打ち直している途中の
@@ -1329,6 +1334,57 @@ mod tests {
         assert_eq!(
             doc.settings.font_choice,
             FontChoice::Custom("Meiryo UI".to_string())
+        );
+    }
+
+    #[test]
+    fn test_frontmatter_font_names_containing_gothic_or_mincho_stay_custom() {
+        // "BIZ UDGothic" 等、実在のフォント名に "gothic"/"mincho" という文字列が含まれるのは
+        // ごく普通（MS Gothic, Yu Gothic, BIZ UDPGothic, Yu Mincho...）。部分一致でプリセットに
+        // 丸めてしまうと、カスタムで選んだ特定のフォントが無視され、常にプリセット優先順位
+        // （BIZ UDPGothic等）に差し替わってしまうため、完全一致でなければCustomのまま保持する
+        for name in [
+            "BIZ UDGothic",
+            "BIZ UDPGothic",
+            "MS Gothic",
+            "Yu Gothic",
+            "Yu Mincho",
+            "MS Mincho",
+            "BIZ UDPMincho",
+        ] {
+            let src = format!("---\nfont: {name}\n---\n\n本文\n");
+            let doc = parse_document(&src);
+            assert_eq!(
+                doc.settings.font_choice,
+                FontChoice::Custom(name.to_string()),
+                "font name {name:?} should stay as a distinct custom choice, not collapse to a preset"
+            );
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_font_exact_preset_keywords_still_map_to_presets() {
+        assert_eq!(
+            parse_document("---\nfont: gothic\n---\n\n本文\n").settings.font_choice,
+            FontChoice::Gothic
+        );
+        assert_eq!(
+            parse_document("---\nfont: Gothic\n---\n\n本文\n").settings.font_choice,
+            FontChoice::Gothic
+        );
+        assert_eq!(
+            parse_document("---\nfont: ゴシック体\n---\n\n本文\n")
+                .settings
+                .font_choice,
+            FontChoice::Gothic
+        );
+        assert_eq!(
+            parse_document("---\nfont: mincho\n---\n\n本文\n").settings.font_choice,
+            FontChoice::Mincho
+        );
+        assert_eq!(
+            parse_document("---\nfont: 明朝\n---\n\n本文\n").settings.font_choice,
+            FontChoice::Mincho
         );
     }
 
