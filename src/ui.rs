@@ -19,7 +19,7 @@ use crate::docx_export::generate_docx_bytes_with_base;
 use crate::html_export::generate_html_with_base;
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{
-    extract_headings_outline, parse_document, update_document_settings_in_markdown,
+    extract_headings_outline, parse_document, parse_settings, update_document_settings_in_markdown,
 };
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{
@@ -1041,7 +1041,7 @@ impl TyperApp {
         egui::Panel::top("page_settings_bar")
             .exact_size(34.0)
             .show(ui, |ui| {
-                let mut doc_settings = parse_document(&self.markdown_text).settings;
+                let mut doc_settings = parse_settings(&self.markdown_text);
                 let mut changed = false;
 
                 ui.horizontal_centered(|ui| {

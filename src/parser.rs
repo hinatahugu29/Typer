@@ -25,10 +25,26 @@ const COLUMNS_START_MARKER_PREFIX: &str = "@@TYPER_COLUMNS_START:";
 const COLUMNS_START_MARKER_SUFFIX: &str = "@@";
 const COLUMNS_END_MARKER: &str = "@@TYPER_COLUMNS_END@@";
 
+/// フロントマターだけを読み、`{{key}}` を置き換える前の設定を返す。
+/// ページ設定バーはこの値をフロントマターへ書き戻すため、置き換え済みの値
+/// （`parse_document` の結果）を使うと `{{会社名}}` が実際の値で上書きされてしまう
+pub fn parse_settings(input: &str) -> DocumentSettings {
+    extract_frontmatter(input).0
+}
+
 /// 原稿テキスト全体を解析して内部文書モデル (`Document`) を返す
 pub fn parse_document(input: &str) -> Document {
-    let (settings, body) = extract_frontmatter(input);
+    let (mut settings, body) = extract_frontmatter(input);
     let substituted = substitute_custom_vars(body, &settings.custom_vars);
+    for field in [
+        &mut settings.header_text,
+        &mut settings.footer_text,
+        &mut settings.watermark,
+    ] {
+        if let Some(text) = field.as_mut() {
+            *text = replace_vars_in_line(text, &settings.custom_vars);
+        }
+    }
     let preprocessed = preprocess_block_directives(&substituted);
 
     let mut options = Options::empty();
@@ -1040,27 +1056,94 @@ fn expand_custom_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
     // pulldown-cmark は `[重要]{red}` のような連続したテキストを `[重要]` と `{red}` のように
     // 複数の `Event::Text` へ分割することがあるため、独自記法の境界をまたいで見失わないよう、
     // 隣接する `Inline::Text` をいったん1つの文字列へ結合してから走査する
+    //
+    // 数式・インラインコードは `[赤字の中 $x$]{red}` のように独自記法の内側にも書かれるため、
+    // ここで区切らず私用領域の目印1文字に置き換えてテキストに含め、解析後に元へ戻す
     let mut out = Vec::with_capacity(inlines.len());
     let mut text_buf = String::new();
+    let mut atoms: Vec<Option<Inline>> = Vec::new();
 
     for inline in inlines {
         match inline {
             Inline::Text(s) => {
                 text_buf.push_str(&s);
             }
-            other => {
-                if !text_buf.is_empty() {
-                    parse_inline_custom_spans(&text_buf, &mut out);
-                    text_buf.clear();
+            atom @ (Inline::Math { .. } | Inline::Code(_)) => {
+                match char::from_u32(ATOM_PLACEHOLDER_BASE + atoms.len() as u32) {
+                    Some(marker) => {
+                        text_buf.push(marker);
+                        atoms.push(Some(atom));
+                    }
+                    None => {
+                        flush_custom_spans(&mut text_buf, &mut out);
+                        out.push(atom);
+                    }
                 }
+            }
+            other => {
+                flush_custom_spans(&mut text_buf, &mut out);
                 out.push(other);
             }
         }
     }
-    if !text_buf.is_empty() {
-        parse_inline_custom_spans(&text_buf, &mut out);
-    }
+    flush_custom_spans(&mut text_buf, &mut out);
+    let out = if atoms.is_empty() {
+        out
+    } else {
+        restore_atoms(out, &mut atoms)
+    };
     attach_image_size_attrs(out)
+}
+
+/// 補助私用領域（U+F0000〜）。原稿本文に現れることはまずない
+const ATOM_PLACEHOLDER_BASE: u32 = 0xF0000;
+
+fn flush_custom_spans(text_buf: &mut String, out: &mut Vec<Inline>) {
+    if !text_buf.is_empty() {
+        parse_inline_custom_spans(text_buf, out);
+        text_buf.clear();
+    }
+}
+
+fn atom_index(c: char) -> Option<usize> {
+    (c as u32)
+        .checked_sub(ATOM_PLACEHOLDER_BASE)
+        .filter(|i| *i < 0x10000)
+        .map(|i| i as usize)
+}
+
+/// 目印の文字を元の数式・コードに戻す（色付け等の `Styled` の内側も含めて）
+fn restore_atoms(inlines: Vec<Inline>, atoms: &mut [Option<Inline>]) -> Vec<Inline> {
+    let mut out = Vec::with_capacity(inlines.len());
+    for inline in inlines {
+        match inline {
+            Inline::Text(text) => {
+                let mut plain = String::new();
+                for c in text.chars() {
+                    match atom_index(c).and_then(|i| atoms.get_mut(i)).and_then(Option::take) {
+                        Some(atom) => {
+                            if !plain.is_empty() {
+                                out.push(Inline::Text(std::mem::take(&mut plain)));
+                            }
+                            out.push(atom);
+                        }
+                        // 属性指定の中などに紛れ込んだ目印は捨てる
+                        None if atom_index(c).is_some() => {}
+                        None => plain.push(c),
+                    }
+                }
+                if !plain.is_empty() {
+                    out.push(Inline::Text(plain));
+                }
+            }
+            Inline::Styled { content, style } => out.push(Inline::Styled {
+                content: restore_atoms(content, atoms),
+                style,
+            }),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `![alt](url){width: 50%, float: true, dx: 10mm, dy: -5mm}` のように画像直後に置かれた
@@ -1407,6 +1490,38 @@ mod tests {
         assert!(display
             .iter()
             .any(|i| matches!(i, Inline::Math { display: true, tex } if tex.contains(r"\frac{1}{2}"))));
+    }
+
+    #[test]
+    fn test_math_and_code_inside_color_span_are_kept_inside_the_span() {
+        let content = first_paragraph(r"前 [赤字の中 $\pi r^2$ と `code`]{red} 後");
+        let styled = content
+            .iter()
+            .find_map(|i| match i {
+                Inline::Styled { content, .. } => Some(content),
+                _ => None,
+            })
+            .expect("color span should be parsed");
+        assert!(styled.contains(&Inline::Math {
+            tex: r"\pi r^2".to_string(),
+            display: false
+        }));
+        assert!(styled.contains(&Inline::Code("code".to_string())));
+        assert!(!format!("{content:?}").contains("{red}"));
+    }
+
+    #[test]
+    fn test_custom_vars_apply_to_header_footer_and_watermark_but_not_raw_settings() {
+        let src = "---\n会社名: 株式会社サンプル\nheader: {{会社名}} 社内資料\nfooter: {{会社名}}\nwatermark: {{会社名}}\n---\n\n本文\n";
+        let s = parse_document(src).settings;
+        assert_eq!(s.header_text.as_deref(), Some("株式会社サンプル 社内資料"));
+        assert_eq!(s.footer_text.as_deref(), Some("株式会社サンプル"));
+        assert_eq!(s.watermark.as_deref(), Some("株式会社サンプル"));
+        // ページ設定バーが書き戻す値は、置き換え前のテンプレートのまま
+        let raw = parse_settings(src);
+        assert_eq!(raw.header_text.as_deref(), Some("{{会社名}} 社内資料"));
+        let rewritten = update_document_settings_in_markdown(src, &raw);
+        assert!(rewritten.contains("header: {{会社名}} 社内資料"));
     }
 
     #[test]
