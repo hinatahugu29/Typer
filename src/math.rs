@@ -155,6 +155,7 @@ pub fn latex_to_typst(tex: &str) -> String {
     let mut conv = Converter {
         chars: tex.chars().collect(),
         pos: 0,
+        call_depth: 0,
     };
     conv.sequence(None).trim().to_string()
 }
@@ -162,6 +163,8 @@ pub fn latex_to_typst(tex: &str) -> String {
 struct Converter {
     chars: Vec<char>,
     pos: usize,
+    /// `frac(...)` などTypst関数の引数の中にいる深さ。引数内では `,` `;` が区切りになるため文字列にする
+    call_depth: usize,
 }
 
 impl Converter {
@@ -231,7 +234,9 @@ impl Converter {
 
     /// 関数呼び出しの引数として埋め込む形（空なら `""`）
     fn call_argument(&mut self) -> String {
+        self.call_depth += 1;
         let arg = self.argument();
+        self.call_depth -= 1;
         if arg.trim().is_empty() {
             "\"\"".to_string()
         } else {
@@ -261,10 +266,10 @@ impl Converter {
             'a'..='z' | 'A'..='Z' => c.to_string(),
             '+' | '-' | '=' | '<' | '>' | '(' | ')' | '[' | ']' | '|' | '!' | '\'' | '*' | ':'
             | '?' | '&' => c.to_string(),
-            // Typstの数式では `/` が分数、`,` `;` が関数引数の区切りになるため文字として出す
+            // Typstの数式では `/` が分数、関数引数の中の `,` `;` が区切りになるため文字として出す
             '/' => "\\/".to_string(),
-            ',' => "\",\"".to_string(),
-            ';' => "\";\"".to_string(),
+            ',' | ';' if self.call_depth > 0 => quote(&c.to_string()),
+            ',' | ';' => c.to_string(),
             '~' => "space".to_string(),
             '"' => "\\\"".to_string(),
             '#' | '$' | '@' | '`' => format!("\\{c}"),
@@ -307,7 +312,9 @@ impl Converter {
             self.skip_spaces();
             if self.peek() == Some('[') {
                 self.pos += 1;
+                self.call_depth += 1;
                 let index = self.sequence(Some(']'));
+                self.call_depth -= 1;
                 let radicand = self.call_argument();
                 let index = if index.trim().is_empty() { "\"\"".to_string() } else { index };
                 return format!("root({index}, {radicand})");
@@ -386,6 +393,7 @@ pub(crate) fn all_supported_samples() -> Vec<String> {
     samples.extend(
         [
             r"\sqrt[3]{8}",
+            r"\sqrt[a,b;c]{x,y} \frac{1,2;3}{4} \max(a, b) \{1, 2\}",
             r"\text{円} \mbox{cm} \operatorname{f}(x)",
             r"\foo \frac{}{} x^ ",
             r#"a/b, c; "q" # @ ` ~ é あ × ÷"#,
@@ -426,6 +434,8 @@ mod tests {
     fn test_slash_and_comma_are_literal() {
         assert_eq!(latex_to_typst("a/b"), "a \\/ b");
         assert_eq!(latex_to_typst(r"\frac{1,5}{2}"), "frac(1 \",\" 5, 2)");
+        // 関数引数の外では普通のカンマとして出す（文字列にすると前後に余計な空白が入る）
+        assert_eq!(latex_to_typst(r"\alpha, \beta"), "alpha , beta");
     }
 
     #[test]
