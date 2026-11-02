@@ -56,6 +56,8 @@ pub struct DocumentSettings {
     pub columns: u8,
     /// 透かし文字（例: "社外秘", "DRAFT"）。未指定時は非表示
     pub watermark: Option<String>,
+    /// フロントマターで定義された独自変数（本文中の `{{key}}` を値に置換するために使用）
+    pub custom_vars: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for DocumentSettings {
@@ -73,6 +75,7 @@ impl Default for DocumentSettings {
             show_page_number: true,
             columns: 1,
             watermark: None,
+            custom_vars: std::collections::BTreeMap::new(),
         }
     }
 }

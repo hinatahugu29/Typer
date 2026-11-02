@@ -28,7 +28,8 @@ const COLUMNS_END_MARKER: &str = "@@TYPER_COLUMNS_END@@";
 /// 原稿テキスト全体を解析して内部文書モデル (`Document`) を返す
 pub fn parse_document(input: &str) -> Document {
     let (settings, body) = extract_frontmatter(input);
-    let preprocessed = preprocess_block_directives(body);
+    let substituted = substitute_custom_vars(body, &settings.custom_vars);
+    let preprocessed = preprocess_block_directives(&substituted);
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -424,6 +425,9 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     if let Some(watermark) = &settings.watermark {
         let _ = writeln!(frontmatter, "watermark: {watermark}");
     }
+    for (key, val) in &settings.custom_vars {
+        let _ = writeln!(frontmatter, "{key}: {val}");
+    }
     frontmatter.push_str("---\n\n");
     frontmatter.push_str(trimmed_body);
     frontmatter
@@ -631,12 +635,73 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                         settings.watermark = Some(val.to_string());
                     }
                 }
-                _ => {}
+                _ => {
+                    if !key.is_empty() && !val.is_empty() {
+                        settings.custom_vars.insert(key, val.to_string());
+                    }
+                }
             }
         }
     }
 
     (settings, &trimmed[byte_offset..])
+}
+
+/// 本文中の `{{key}}` をフロントマターで定義された変数の値に置換する。
+/// フェンスコード内（``` ... ```）は置換対象から除外する。
+fn substitute_custom_vars(body: &str, vars: &std::collections::BTreeMap<String, String>) -> String {
+    if vars.is_empty() {
+        return body.to_string();
+    }
+
+    let mut out = String::with_capacity(body.len());
+    let mut in_fenced_code = false;
+
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            in_fenced_code = !in_fenced_code;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        if in_fenced_code {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        out.push_str(&replace_vars_in_line(line, vars));
+        out.push('\n');
+    }
+
+    // 入力が末尾改行を持たない場合、追加した余分な改行を取り除く
+    if !body.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn replace_vars_in_line(line: &str, vars: &std::collections::BTreeMap<String, String>) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut rest = line;
+
+    while let Some(start) = rest.find("{{") {
+        let Some(end_rel) = rest[start + 2..].find("}}") else {
+            result.push_str(rest);
+            return result;
+        };
+        let key = rest[start + 2..start + 2 + end_rel].trim();
+        result.push_str(&rest[..start]);
+        if let Some(val) = vars.get(key) {
+            result.push_str(val);
+        } else {
+            result.push_str(&rest[start..start + 2 + end_rel + 2]);
+        }
+        rest = &rest[start + 2 + end_rel + 2..];
+    }
+    result.push_str(rest);
+    result
 }
 
 /// 単独行のブロック属性 `{widths: ...}`, `{align: ...}` や `:::pagebreak` を
@@ -1333,6 +1398,41 @@ line-height: 1.4
 
         let regenerated = update_document_settings_in_markdown(src, &doc.settings);
         assert!(regenerated.contains("accent-color: #e37400"));
+    }
+
+    #[test]
+    fn test_frontmatter_custom_var_substitution() {
+        let src = "---\ncompany: 株式会社サンプル\ntitle: 見積書\n---\n\n# {{title}}\n\n発行元: {{company}}\n";
+        let doc = parse_document(src);
+        assert_eq!(
+            doc.settings.custom_vars.get("company").map(String::as_str),
+            Some("株式会社サンプル")
+        );
+
+        let text = inlines_to_plain_text(match &doc.blocks[0] {
+            Block::Heading { content, .. } => content,
+            other => panic!("unexpected block: {other:?}"),
+        });
+        assert_eq!(text, "見積書");
+    }
+
+    #[test]
+    fn test_frontmatter_custom_var_undefined_left_as_is() {
+        let src = "---\ntitle: 見積書\n---\n\n{{unknown}}\n";
+        let doc = parse_document(src);
+        let text = inlines_to_plain_text(match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => content,
+            other => panic!("unexpected block: {other:?}"),
+        });
+        assert_eq!(text, "{{unknown}}");
+    }
+
+    #[test]
+    fn test_frontmatter_custom_var_roundtrip() {
+        let src = "---\ncompany: サンプル\n---\n\n本文\n";
+        let doc = parse_document(src);
+        let regenerated = update_document_settings_in_markdown(src, &doc.settings);
+        assert!(regenerated.contains("company: サンプル"));
     }
 
     #[test]
