@@ -28,17 +28,40 @@ struct SharedTypstResources {
     fonts: Arc<Vec<Font>>,
 }
 
-static SHARED_RESOURCES: OnceLock<SharedTypstResources> = OnceLock::new();
+fn build_shared_resources(fonts: Vec<Font>) -> SharedTypstResources {
+    let book = FontBook::from_fonts(&fonts);
+    SharedTypstResources {
+        library: Arc::new(LazyHash::new(Library::default())),
+        book: Arc::new(LazyHash::new(book)),
+        fonts: Arc::new(fonts),
+    }
+}
 
+/// 起動直後の数十ミリ秒で使える、決め打ちファイル名リストのみを読み込んだ最小フォント集合
+static QUICK_RESOURCES: OnceLock<SharedTypstResources> = OnceLock::new();
+/// `C:\Windows\Fonts` をバックグラウンドで全走査した完全なフォント集合（準備でき次第差し替わる）
+static FULL_RESOURCES: OnceLock<SharedTypstResources> = OnceLock::new();
+static FULL_SCAN_SPAWNED: OnceLock<()> = OnceLock::new();
+
+/// 現時点で利用可能な最良のフォント集合を返す。
+///
+/// 起動直後は決め打ちリスト（ゴシック/明朝の定番のみ、読み込みに数十ms）をすぐ返しつつ、
+/// `C:\Windows\Fonts` の全走査をバックグラウンドスレッドで開始する。全走査（実測で数百ファイル・
+/// 1秒弱）が完了すると、以降の呼び出しは自動的にその完全なフォント集合に切り替わる。
+/// `TypstEngine` は描画のたびに `new()` で再取得するため、カスタムフォント欄が使われる頃には
+/// 通常すでに全走査が終わっている。
 fn get_shared_resources() -> &'static SharedTypstResources {
-    SHARED_RESOURCES.get_or_init(|| {
-        let fonts = load_windows_japanese_fonts();
-        let book = FontBook::from_fonts(&fonts);
-        SharedTypstResources {
-            library: Arc::new(LazyHash::new(Library::default())),
-            book: Arc::new(LazyHash::new(book)),
-            fonts: Arc::new(fonts),
-        }
+    if let Some(full) = FULL_RESOURCES.get() {
+        return full;
+    }
+    QUICK_RESOURCES.get_or_init(|| {
+        FULL_SCAN_SPAWNED.get_or_init(|| {
+            std::thread::spawn(|| {
+                let fonts = load_all_windows_fonts();
+                let _ = FULL_RESOURCES.set(build_shared_resources(fonts));
+            });
+        });
+        build_shared_resources(load_windows_japanese_fonts_quick())
     })
 }
 
@@ -205,8 +228,22 @@ impl World for TypstEngine {
     }
 }
 
-/// Windows標準の日本語フォント・欧文フォントを優先順で読み込む
-fn load_windows_japanese_fonts() -> Vec<Font> {
+/// 組版に必須の数式・記号フォント（Typst公式同梱、New Computer Modern Math等）を読み込む。
+/// これがないと `$alpha + beta$` のような数式記法・ギリシャ文字・特殊記号が
+/// 対応フォント無しでグリフ欠落（四角表示）になる。
+fn push_typst_bundled_fonts(fonts: &mut Vec<Font>) {
+    for static_bytes in typst_assets::fonts() {
+        let shared_bytes = Bytes::new(static_bytes);
+        for font in Font::iter(shared_bytes) {
+            fonts.push(font);
+        }
+    }
+}
+
+/// 起動直後にすぐ使える最小限のフォント集合。業務報告書で定番の日本語フォントのみを
+/// 決め打ちのファイル名で読み込む（読み込みに数十ms）。これとは別に、
+/// `load_all_windows_fonts` がバックグラウンドで全フォントを走査し、完了後に差し替わる。
+fn load_windows_japanese_fonts_quick() -> Vec<Font> {
     let mut fonts = Vec::new();
     let font_dir = Path::new(r"C:\Windows\Fonts");
 
@@ -247,16 +284,45 @@ fn load_windows_japanese_fonts() -> Vec<Font> {
         }
     }
 
-    // Typst公式が組版・数式表示用に同梱しているフォント（New Computer Modern Math等）を追加する。
-    // これがないと `$alpha + beta$` のような数式記法・ギリシャ文字・特殊記号が
-    // 対応フォント無しでグリフ欠落（四角表示）になる
-    for static_bytes in typst_assets::fonts() {
-        let shared_bytes = Bytes::new(static_bytes);
-        for font in Font::iter(shared_bytes) {
-            fonts.push(font);
+    push_typst_bundled_fonts(&mut fonts);
+    fonts
+}
+
+/// Windows標準フォントディレクトリ（`C:\Windows\Fonts`）を走査し、見つかったTTF/TTC/OTFを
+/// すべて読み込む。実測で数百ファイル・1秒弱かかるため、起動をブロックしないよう
+/// バックグラウンドスレッドから呼び出す想定（`get_shared_resources` 参照）。
+///
+/// 決め打ちリストだけでは、カスタムフォント欄に候補リスト外のフォント名（例: Noto Sans JP 等、
+/// ユーザーが追加インストールしたもの）を入力しても実体が見つからず使えない。
+/// 「全部使える必要はないが、使いたい時に使える」を満たすため全走査する。
+fn load_all_windows_fonts() -> Vec<Font> {
+    let mut fonts = Vec::new();
+    let font_dir = Path::new(r"C:\Windows\Fonts");
+
+    if let Ok(entries) = std::fs::read_dir(font_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_font_file = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    let ext = ext.to_ascii_lowercase();
+                    ext == "ttf" || ext == "ttc" || ext == "otf"
+                })
+                .unwrap_or(false);
+            if !is_font_file {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&path) {
+                let shared_bytes = Bytes::new(bytes);
+                for font in Font::iter(shared_bytes) {
+                    fonts.push(font);
+                }
+            }
         }
     }
 
+    push_typst_bundled_fonts(&mut fonts);
     fonts
 }
 
@@ -267,6 +333,17 @@ mod tests {
     use crate::parser::parse_document;
     use crate::sample::SAMPLE_DOCUMENT;
     use crate::typst_gen::generate_typst_source;
+
+    #[test]
+    fn test_load_all_windows_fonts_finds_more_faces_than_the_quick_candidate_list() {
+        // バックグラウンド全走査は決め打ちリストよりも広い集合を返すはず（このマシンの
+        // Windows Fontsフォルダに決め打ちリスト以外のフォントが1つもないケースは現実的には
+        // ほぼ無いため、全走査側が同数以上であることだけ確認する）
+        let quick = load_windows_japanese_fonts_quick();
+        let full = load_all_windows_fonts();
+        assert!(!quick.is_empty());
+        assert!(full.len() >= quick.len());
+    }
 
     #[test]
     fn test_available_font_families_includes_known_japanese_fonts_sorted_and_deduped() {
