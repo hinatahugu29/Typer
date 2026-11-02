@@ -393,9 +393,10 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
         Orientation::Portrait => "portrait",
         Orientation::Landscape => "landscape",
     };
-    let font = match settings.font_choice {
-        FontChoice::Gothic => "gothic",
-        FontChoice::Mincho => "mincho",
+    let font = match &settings.font_choice {
+        FontChoice::Gothic => "gothic".to_string(),
+        FontChoice::Mincho => "mincho".to_string(),
+        FontChoice::Custom(name) => name.clone(),
     };
     let paper = settings.paper.to_ascii_uppercase();
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
@@ -597,8 +598,11 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     let v_low = val.to_ascii_lowercase();
                     if v_low.contains("mincho") || val.contains("明朝") {
                         settings.font_choice = FontChoice::Mincho;
-                    } else {
+                    } else if v_low.contains("gothic") || val.contains("ゴシック") || val.is_empty()
+                    {
                         settings.font_choice = FontChoice::Gothic;
+                    } else {
+                        settings.font_choice = FontChoice::Custom(val.to_string());
                     }
                 }
                 "accent-color" | "accent" => {
@@ -1315,6 +1319,28 @@ fn normalize_color(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_frontmatter_font_arbitrary_name_becomes_custom_choice() {
+        let src = "---\nfont: Meiryo UI\n---\n\n本文\n";
+        let doc = parse_document(src);
+        assert_eq!(
+            doc.settings.font_choice,
+            FontChoice::Custom("Meiryo UI".to_string())
+        );
+    }
+
+    #[test]
+    fn test_update_document_settings_in_markdown_roundtrips_custom_font() {
+        let mut settings = DocumentSettings::default();
+        settings.font_choice = FontChoice::Custom("Noto Sans JP".to_string());
+        let updated = update_document_settings_in_markdown("---\n---\n\n本文\n", &settings);
+        let doc = parse_document(&updated);
+        assert_eq!(
+            doc.settings.font_choice,
+            FontChoice::Custom("Noto Sans JP".to_string())
+        );
+    }
 
     #[test]
     fn test_columns_directive_wraps_enclosed_blocks_only() {

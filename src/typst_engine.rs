@@ -203,8 +203,16 @@ fn load_windows_japanese_fonts() -> Vec<Font> {
         // 游ゴシック / 游明朝
         "YuGothM.ttc",
         "YuGothB.ttc",
+        "YuGothL.ttc",
         "yumin.ttf",
         "yumindb.ttf",
+        "yuminl.ttf",
+        // メイリオ（「カスタム」フォント指定でよく使われる定番）
+        "meiryo.ttc",
+        "meiryob.ttc",
+        // MS ゴシック / 明朝（互換性重視の環境向け）
+        "msgothic.ttc",
+        "msmincho.ttc",
         // コード用等幅・欧文フォント
         "consola.ttf",
         "consolab.ttf",

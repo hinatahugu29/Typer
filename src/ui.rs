@@ -983,13 +983,38 @@ impl TyperApp {
 
                     // フォント選択
                     let is_gothic = doc_settings.font_choice == FontChoice::Gothic;
+                    let is_mincho = doc_settings.font_choice == FontChoice::Mincho;
                     if ui.selectable_label(is_gothic, "ゴシック体").clicked() && !is_gothic {
                         doc_settings.font_choice = FontChoice::Gothic;
                         changed = true;
                     }
-                    if ui.selectable_label(!is_gothic, "明朝体").clicked() && is_gothic {
+                    if ui.selectable_label(is_mincho, "明朝体").clicked() && !is_mincho {
                         doc_settings.font_choice = FontChoice::Mincho;
                         changed = true;
+                    }
+                    let is_custom = matches!(doc_settings.font_choice, FontChoice::Custom(_));
+                    if ui
+                        .selectable_label(is_custom, "カスタム")
+                        .on_hover_text(
+                            "Windowsにインストール済みの任意のフォント名を指定します（見つからない場合はゴシック体にフォールバックします）",
+                        )
+                        .clicked()
+                        && !is_custom
+                    {
+                        doc_settings.font_choice = FontChoice::Custom("Meiryo".to_string());
+                        changed = true;
+                    }
+                    if let FontChoice::Custom(name) = &mut doc_settings.font_choice {
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(name)
+                                    .desired_width(90.0)
+                                    .hint_text("例: Meiryo UI"),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
                     }
 
                     ui.separator();

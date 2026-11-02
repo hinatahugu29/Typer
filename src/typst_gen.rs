@@ -30,12 +30,17 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
     let accent = sanitize_color_hex(&s.accent_color);
 
-    let font_list = match s.font_choice {
+    let font_list = match &s.font_choice {
         FontChoice::Gothic => {
-            r#"("BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic")"#
+            r#"("BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic")"#.to_string()
         }
         FontChoice::Mincho => {
             r#"("BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic")"#
+                .to_string()
+        }
+        FontChoice::Custom(name) => {
+            let safe_name = sanitize_typst_string_literal(name);
+            format!(r#"("{safe_name}", "Yu Gothic", "Meiryo")"#)
         }
     };
 
@@ -700,6 +705,21 @@ fn sanitize_ident(raw: &str, default: &str) -> String {
     }
 }
 
+/// 任意のフォント名をTypstの文字列リテラルとして安全に埋め込めるようにする。
+/// `"` によるコード注入を防ぎつつ、制御文字・バックスラッシュも除去する。
+fn sanitize_typst_string_literal(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "Yu Gothic".to_string()
+    } else {
+        trimmed.chars().take(100).collect()
+    }
+}
+
 fn sanitize_length(raw: &str, default: &str) -> String {
     let trimmed = raw.trim();
     let valid_units = ["pt", "mm", "cm", "in", "em", "%"];
@@ -759,6 +779,24 @@ mod tests {
         let mut out = String::new();
         escape_typst_text(&mut out, "#[a*b]_c_");
         assert_eq!(out, "\\#\\[a\\*b\\]\\_c\\_");
+    }
+
+    #[test]
+    fn test_sanitize_typst_string_literal_strips_quotes_and_backslashes() {
+        assert_eq!(sanitize_typst_string_literal("Meiryo UI"), "Meiryo UI");
+        assert_eq!(
+            sanitize_typst_string_literal(r#"Evil"); #danger("#),
+            "Evil); #danger("
+        );
+        assert_eq!(sanitize_typst_string_literal(""), "Yu Gothic");
+    }
+
+    #[test]
+    fn test_custom_font_choice_is_embedded_in_generated_typst_code() {
+        let mut doc = parse_document("本文\n");
+        doc.settings.font_choice = crate::model::FontChoice::Custom("Meiryo UI".to_string());
+        let code = generate_typst_source(&doc);
+        assert!(code.contains(r#"("Meiryo UI", "Yu Gothic", "Meiryo")"#));
     }
 
     #[test]

@@ -29,11 +29,14 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     }
 
     let s = &doc.settings;
-    let font_family = match s.font_choice {
+    let font_family = match &s.font_choice {
         FontChoice::Gothic => {
-            r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#
+            r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#.to_string()
         }
-        FontChoice::Mincho => r#""BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif"#,
+        FontChoice::Mincho => r#""BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif"#.to_string(),
+        FontChoice::Custom(name) => {
+            format!(r#""{}", "Yu Gothic", sans-serif"#, html_escape(name))
+        }
     };
     let accent_color = sanitize_color_hex(&s.accent_color);
     let columns_css = if s.columns > 1 {
@@ -781,6 +784,16 @@ mod tests {
     fn test_html_escape_escapes_all_special_chars() {
         assert_eq!(html_escape(r#"<a>&"'"#), "&lt;a&gt;&amp;&quot;&#39;");
         assert_eq!(html_escape("普通の日本語"), "普通の日本語");
+    }
+
+    #[test]
+    fn test_custom_font_choice_is_escaped_and_embedded_in_html() {
+        let mut doc = parse_document("本文\n");
+        doc.settings.font_choice =
+            crate::model::FontChoice::Custom(r#"Evil</style><script>"#.to_string());
+        let html = generate_html(&doc);
+        assert!(html.contains(r#""Evil&lt;/style&gt;&lt;script&gt;", "Yu Gothic", sans-serif"#));
+        assert!(!html.contains("<script>"));
     }
 
     #[test]

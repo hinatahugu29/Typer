@@ -24,10 +24,12 @@ pub enum Orientation {
     Landscape,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FontChoice {
     Gothic,
     Mincho,
+    /// ユーザーが指定したフォントファミリー名をそのまま使用する（Windowsにインストール済みの任意フォント）
+    Custom(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
