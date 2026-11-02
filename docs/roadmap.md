@@ -172,8 +172,8 @@
 - [x] **11-1. `$...$` / `$$...$$` の数式対応** — pulldown-cmarkの `ENABLE_MATH` で認識し、LaTeX記法を自前の軽量変換器（`src/math.rs`）でTypst数式記法へ変換。未知のコマンドは文字列に落としてコンパイルエラーを防ぐ。金額表記（`$100`）はPandoc同様の規則で除外
 - [ ] **11-2.（需要次第）変換範囲の拡大** — 行列・場合分け（`\begin{pmatrix}` `\begin{cases}`）等。必要になったら mitex 等の本格的な変換器の採用を検討
 - [x] **11-3. HTML/Word での数式表示** — 数式1つずつをTypstで組み（`typst_gen::math_snippet_source`）、HTMLはSVG（データURIの `<img>`）、WordはPNG（`word/media/`）で埋め込み。行内数式はTypstのレイアウト結果から取ったベースライン位置で本文と高さを揃える（HTMLは `vertical-align`、Wordは `w:position`）。PDFと見た目が一致し、HTMLは1ファイル・JavaScript不要のまま。LibreOffice（DOCX→PDF変換）で表示を確認済み
-- [ ] **11-5.（需要次第）Wordで編集可能な数式** — OMMLへの変換（現状は画像のため、Word上での数式編集は不可）
 - [ ] **11-4.（任意）数式の文字サイズ感の調整** — 数式用フォント（New Computer Modern Math）が和文より小さく細く見える場合がある
+- [ ] **11-5.（需要次第）Wordで編集可能な数式** — OMMLへの変換（現状は画像のため、Word上での数式編集は不可）
 
 ## Milestone 12：独自変数
 - [x] **12-1. `{{キー}}` の差し込み** — フロントマターの未知キーを変数として本文に差し込み（コードブロック内は対象外）
