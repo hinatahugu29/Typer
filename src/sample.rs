@@ -1,6 +1,7 @@
 //! 初期表示用のサンプル業務報告書原稿
 
 pub const SAMPLE_DOCUMENT: &str = r#"---
+title:
 paper: A4
 orientation: portrait
 margin: 20mm

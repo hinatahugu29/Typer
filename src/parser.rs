@@ -436,8 +436,13 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
 
     let mut frontmatter = String::from("---\n");
-    if let Some(title) = &settings.title {
-        let _ = writeln!(frontmatter, "title: {title}");
+    // 未指定でも空の `title:` 行を残す（空なら最初の見出しがタイトルになるので害はなく、
+    // 「ここに書けばタイトルを変えられる」という目印になる）
+    match settings.title.as_deref() {
+        Some(title) => {
+            let _ = writeln!(frontmatter, "title: {title}");
+        }
+        None => frontmatter.push_str("title:\n"),
     }
     let _ = write!(
         frontmatter,
@@ -1584,6 +1589,22 @@ mod tests {
         let heading_only = parse_document("本文\n\n## 最初の **見出し**\n\n# 次\n");
         assert_eq!(document_title(&heading_only).as_deref(), Some("最初の 見出し"));
         assert_eq!(document_title(&parse_document("本文だけ\n")), None);
+    }
+
+    #[test]
+    fn test_empty_title_line_is_kept_and_falls_back_to_first_heading() {
+        let src = "---\ntitle:\nfont: gothic\n---\n\n# 実践ガイド\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.settings.title, None);
+        assert!(doc.settings.custom_vars.is_empty(), "empty title must not become a variable");
+        assert_eq!(document_title(&doc).as_deref(), Some("実践ガイド"));
+        // 書き戻しでも空の title: 行が先頭に1つだけ残る
+        let rewritten = update_document_settings_in_markdown(src, &parse_settings(src));
+        assert!(rewritten.starts_with("---\ntitle:\npaper:"));
+        assert_eq!(rewritten.matches("title:").count(), 1);
+        // title: が無い文書でも、書き戻すと空の title: 行が入る
+        let added = update_document_settings_in_markdown("本文\n", &parse_settings("本文\n"));
+        assert!(added.starts_with("---\ntitle:\n"));
     }
 
     #[test]

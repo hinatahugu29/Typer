@@ -144,7 +144,7 @@ struct TabSnapshot {
     last_export_path: Option<PathBuf>,
 }
 
-const BLANK_DOCUMENT_TEMPLATE: &str = "---\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n";
+const BLANK_DOCUMENT_TEMPLATE: &str = "---\ntitle:\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n";
 
 pub struct TyperApp {
     /// 編集中の原稿テキスト
