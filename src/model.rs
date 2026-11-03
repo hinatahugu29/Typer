@@ -34,6 +34,8 @@ pub enum FontChoice {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentSettings {
+    /// 文書タイトル（HTMLのタブ名・PDFの文書タイトルに使う）。未指定時は最初の見出しやファイル名で補う
+    pub title: Option<String>,
     /// 用紙サイズ（初期仕様は "a4"）
     pub paper: String,
     /// 用紙の向き（縦 / 横）
@@ -67,6 +69,7 @@ pub struct DocumentSettings {
 impl Default for DocumentSettings {
     fn default() -> Self {
         Self {
+            title: None,
             paper: "a4".to_string(),
             orientation: Orientation::Portrait,
             margin: "20mm".to_string(),

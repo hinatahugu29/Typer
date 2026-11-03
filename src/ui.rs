@@ -665,7 +665,7 @@ impl TyperApp {
             .save_file()
         {
             let start = Instant::now();
-            let doc = parse_document(&self.markdown_text);
+            let doc = self.parse_for_export();
             let base = self.base_dir();
             let typst_code = generate_typst_source_with_base(&doc, base.as_deref());
             let mut engine = TypstEngine::new();
@@ -696,6 +696,20 @@ impl TyperApp {
         }
     }
 
+    /// 出力用に原稿を解析する。`title` も見出しも無い文書は、ファイル名をタイトルにする
+    fn parse_for_export(&self) -> crate::model::Document {
+        let mut doc = parse_document(&self.markdown_text);
+        if crate::parser::document_title(&doc).is_none() {
+            doc.settings.title = self
+                .current_file
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+        }
+        doc
+    }
+
     fn action_export_html(&mut self) {
         let default_name = self
             .current_file
@@ -710,7 +724,7 @@ impl TyperApp {
             .set_file_name(&default_name)
             .save_file()
         {
-            let doc = parse_document(&self.markdown_text);
+            let doc = self.parse_for_export();
             let base = self.base_dir();
             let html = generate_html_with_base(&doc, base.as_deref());
             match std::fs::write(&path, html) {
@@ -739,7 +753,7 @@ impl TyperApp {
             .set_file_name(&default_name)
             .save_file()
         {
-            let doc = parse_document(&self.markdown_text);
+            let doc = self.parse_for_export();
             let base = self.base_dir();
             match generate_docx_bytes_with_base(&doc, base.as_deref()) {
                 Ok(bytes) => match std::fs::write(&path, bytes) {

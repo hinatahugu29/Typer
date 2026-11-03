@@ -653,6 +653,16 @@ mod tests {
     }
 
     #[test]
+    fn test_pdf_document_title_with_quotes_and_backslash_compiles() {
+        let doc = parse_document("---\ntitle: 報告 \"案\" C:\\temp\n---\n\n本文\n");
+        let code = generate_typst_source(&doc);
+        assert!(code.contains(r#"#set document(title: "報告 \"案\" C:\\temp")"#));
+        TypstEngine::new()
+            .export_pdf(&code)
+            .expect("title with quotes/backslash must not break compilation");
+    }
+
+    #[test]
     fn test_math_notation_renders_without_error() {
         // typst-assetsのNewCMMathフォント追加後、数式記法（ギリシャ文字・分数・総和等）を
         // 含む文書がエラーなく組版できることを確認する（実際のグリフ表示は目視確認済み）

@@ -49,6 +49,11 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
     };
     let background_param = page_background_param(s.watermark.as_deref());
 
+    // PDFの文書タイトル（ビューアーのタイトルバー・プロパティに出る）
+    if let Some(title) = crate::parser::document_title(doc) {
+        let _ = writeln!(out, "#set document(title: \"{}\")", escape_typst_string(&title));
+    }
+
     // ページ・基本組版設定プリアンブル
     let _ = writeln!(
         out,
@@ -756,6 +761,20 @@ fn sanitize_ident(raw: &str, default: &str) -> String {
     } else {
         s.to_ascii_lowercase()
     }
+}
+
+/// 任意の文字列をTypstの文字列リテラル（`"..."` の中身）として埋め込めるようエスケープする
+fn escape_typst_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// 任意のフォント名をTypstの文字列リテラルとして安全に埋め込めるようにする。

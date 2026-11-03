@@ -35,8 +35,8 @@ pub fn parse_settings(input: &str) -> DocumentSettings {
 /// 原稿テキスト全体を解析して内部文書モデル (`Document`) を返す
 pub fn parse_document(input: &str) -> Document {
     let (mut settings, body) = extract_frontmatter(input);
-    let substituted = substitute_custom_vars(body, &settings.custom_vars);
     for field in [
+        &mut settings.title,
         &mut settings.header_text,
         &mut settings.footer_text,
         &mut settings.watermark,
@@ -45,6 +45,13 @@ pub fn parse_document(input: &str) -> Document {
             *text = replace_vars_in_line(text, &settings.custom_vars);
         }
     }
+    // `title` は以前は独自変数の1つとして扱われていたため、`{{title}}` での差し込みも引き続き効かせる
+    // （タイトル自体の `{{会社名}}` を置き換えた後の値を差し込む）
+    let mut vars = settings.custom_vars.clone();
+    if let Some(title) = &settings.title {
+        vars.entry("title".to_string()).or_insert_with(|| title.clone());
+    }
+    let substituted = substitute_custom_vars(body, &vars);
     let preprocessed = preprocess_block_directives(&substituted);
 
     let mut options = Options::empty();
@@ -428,8 +435,13 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     let paper = settings.paper.to_ascii_uppercase();
     let trimmed_body = body.trim_start_matches(['\r', '\n']);
 
-    let mut frontmatter = format!(
-        "---\npaper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\n",
+    let mut frontmatter = String::from("---\n");
+    if let Some(title) = &settings.title {
+        let _ = writeln!(frontmatter, "title: {title}");
+    }
+    let _ = write!(
+        frontmatter,
+        "paper: {}\norientation: {}\nmargin: {}\nfont-size: {}\nline-height: {:.1}\nfont: {}\n",
         paper, orient, settings.margin, settings.font_size, settings.line_height, font,
     );
     if let Some(latin) = &settings.latin_font {
@@ -457,6 +469,35 @@ pub fn update_document_settings_in_markdown(input: &str, settings: &DocumentSett
     frontmatter.push_str("---\n\n");
     frontmatter.push_str(trimmed_body);
     frontmatter
+}
+
+/// 文書のタイトル。フロントマターの `title`、なければ最初の見出しの文字列。
+/// どちらも無ければ `None`（呼び出し側でファイル名などを補う）
+pub fn document_title(doc: &Document) -> Option<String> {
+    if let Some(title) = doc.settings.title.as_deref().map(str::trim) {
+        if !title.is_empty() {
+            return Some(title.to_string());
+        }
+    }
+    first_heading_text(&doc.blocks)
+}
+
+fn first_heading_text(blocks: &[Block]) -> Option<String> {
+    for block in blocks {
+        let found = match block {
+            Block::Heading { content, .. } => {
+                let text = inlines_to_plain_text(content);
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                (!text.is_empty()).then_some(text)
+            }
+            Block::Columns { blocks, .. } => first_heading_text(blocks),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 /// `$100 と $200` のような金額表記を数式と誤認識しないよう、Pandocと同じく
@@ -633,6 +674,9 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     if let Ok(lh) = val.parse::<f32>() {
                         settings.line_height = lh.clamp(0.8, 4.0);
                     }
+                }
+                "title" => {
+                    settings.title = (!val.is_empty()).then(|| val.to_string());
                 }
                 "font-latin" | "latin-font" => {
                     settings.latin_font = (!val.is_empty()).then(|| val.to_string());
@@ -1531,6 +1575,30 @@ mod tests {
             let has_math = format!("{content:?}").contains("Math");
             assert!(!has_math, "{src:?} should stay plain text: {content:?}");
         }
+    }
+
+    #[test]
+    fn test_document_title_prefers_frontmatter_then_first_heading() {
+        let with_title = parse_document("---\ntitle: 月次報告\n---\n\n# 見出し\n");
+        assert_eq!(document_title(&with_title).as_deref(), Some("月次報告"));
+        let heading_only = parse_document("本文\n\n## 最初の **見出し**\n\n# 次\n");
+        assert_eq!(document_title(&heading_only).as_deref(), Some("最初の 見出し"));
+        assert_eq!(document_title(&parse_document("本文だけ\n")), None);
+    }
+
+    #[test]
+    fn test_title_supports_vars_and_legacy_title_placeholder() {
+        let doc = parse_document(
+            "---\n会社名: 株式会社サンプル\ntitle: {{会社名}} 月次報告\n---\n\n件名: {{title}}\n",
+        );
+        assert_eq!(doc.settings.title.as_deref(), Some("株式会社サンプル 月次報告"));
+        // 以前は独自変数扱いだったため、本文の {{title}} も差し込まれ続けること
+        assert!(format!("{:?}", doc.blocks).contains("件名: 株式会社サンプル 月次報告"));
+        // ページ設定バーの書き戻しで title 行が失われず、変数もテンプレートのまま残ること
+        let src = "---\n会社名: 株式会社サンプル\ntitle: {{会社名}} 月次報告\n---\n\n本文\n";
+        let rewritten = update_document_settings_in_markdown(src, &parse_settings(src));
+        assert!(rewritten.starts_with("---\ntitle: {{会社名}} 月次報告\n"));
+        assert_eq!(rewritten.matches("title:").count(), 1);
     }
 
     #[test]

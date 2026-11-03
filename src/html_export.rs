@@ -79,7 +79,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>文書出力</title>
+<title>{title}</title>
 <style>
   :root {{
     --text-color: #202124;
@@ -290,6 +290,9 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
 </body>
 </html>
 "#,
+        title = html_escape(
+            &crate::parser::document_title(doc).unwrap_or_else(|| "文書出力".to_string())
+        ),
         font_family = font_family,
         font_size = html_escape(&s.font_size),
         line_height = s.line_height,
@@ -870,6 +873,14 @@ mod tests {
     fn test_html_escape_escapes_all_special_chars() {
         assert_eq!(html_escape(r#"<a>&"'"#), "&lt;a&gt;&amp;&quot;&#39;");
         assert_eq!(html_escape("普通の日本語"), "普通の日本語");
+    }
+
+    #[test]
+    fn test_html_title_uses_document_title_and_is_escaped() {
+        let html = generate_html(&parse_document("# 報告 <案> & 結果\n\n本文\n"));
+        assert!(html.contains("<title>報告 &lt;案&gt; &amp; 結果</title>"));
+        let untitled = generate_html(&parse_document("本文だけ\n"));
+        assert!(untitled.contains("<title>文書出力</title>"));
     }
 
     #[test]

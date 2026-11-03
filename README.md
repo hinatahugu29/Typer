@@ -85,6 +85,7 @@ Microsoft Wordのような高機能ワープロの完全な代替ではなく、
 ### 1. 文書全体設定（先頭フロントマター / GUI設定バーと連動）
 ```yaml
 ---
+title: 月次業務報告書    # 省略可。HTMLのタブ名・PDFの文書タイトル（省略時は最初の見出し → ファイル名）
 paper: A4
 orientation: portrait   # portrait (縦) / landscape (横)
 margin: 20mm

@@ -149,6 +149,7 @@ page-number: on
 
 | キー | 意味・指定例 |
 | :--- | :--- |
+| `title` | 文書タイトル。HTMLのタブ名とPDFの文書タイトルになる。省略すると最初の見出し、それもなければファイル名 |
 | `paper` | 通常は `A4` を使う |
 | `orientation` | `portrait`＝縦、`landscape`＝横。「横」「横向き」も認識 |
 | `margin` | 四辺共通の余白。例：`20mm` |
