@@ -4,7 +4,7 @@
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline,
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, ListItem,
     InlineStyle, Orientation,
 };
 use std::fmt::Write;
@@ -75,6 +75,11 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
   justify: true,
 )
 #show heading: set block(above: 1.4em, below: 0.75em, sticky: true)
+#show outline: it => {{
+  state("typer-in-outline", false).update(true)
+  it
+  state("typer-in-outline", false).update(false)
+}}
 #show heading.where(level: 1): it => block(
   width: 100%,
   above: 1.5em,
@@ -191,21 +196,8 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             attrs,
         } => {
             let mut inner = String::new();
-            if *ordered && *start != 1 {
-                // 既定（1始まり）以外の番号付きリストは、`+` 記法では開始番号を指定できないため
-                // `#enum(start: ...)` 関数形式で明示的に組み立てる
-                let _ = write!(inner, "#enum(start: {start})[\n");
-                for item in items {
-                    inner.push_str("  [");
-                    render_inlines(&mut inner, &item.content, base_dir);
-                    render_list_item_children(&mut inner, &item.children, base_dir, 1);
-                    inner.push_str("]\n");
-                }
-                inner.push(']');
-            } else {
-                render_list_items(&mut inner, items, *ordered, base_dir, 0);
-            }
-            wrap_with_block_attrs(out, inner.trim_end(), attrs);
+            render_list(&mut inner, *ordered, *start, items, base_dir);
+            wrap_with_block_attrs(out, &inner, attrs);
             out.push_str("\n\n");
         }
         Block::Table {
@@ -244,9 +236,11 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             code,
             attrs,
         } => {
-            let escaped = code.replace("```", "` ` `");
+            let escaped = code.trim_end_matches('\n').replace("```", "` ` `");
+            // ``` の直後に改行を入れる。続けて書くと、Typstは1行目の最初の語を
+            // 言語名として読み取り、本文から消してしまう（`cmd --flag` の `cmd` が消える）
             let raw_block = format!(
-                "#block(width: 100%, fill: rgb(\"#f1f3f4\"), inset: 8pt, radius: 3pt)[\n```{}\n```]",
+                "#block(width: 100%, fill: rgb(\"#f1f3f4\"), inset: 8pt, radius: 3pt)[\n```\n{}\n```]",
                 escaped
             );
             wrap_with_block_attrs(out, &raw_block, attrs);
@@ -460,36 +454,60 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
     out.push_str(&current);
 }
 
-/// リスト項目を再帰的にTypstマークアップへ変換する（入れ子リスト対応）
-/// Typstの箇条書き記法はインデントの深さで入れ子を表現するため、`depth`段分のスペースを付与する
-fn render_list_items(
-    out: &mut String,
-    items: &[crate::model::ListItem],
-    ordered: bool,
-    base_dir: Option<&Path>,
-    depth: usize,
-) {
-    let indent = "  ".repeat(depth);
-    for item in items {
-        out.push_str(&indent);
-        out.push_str(if ordered { "+ " } else { "- " });
-        render_inlines(out, &item.content, base_dir);
-        out.push('\n');
-        render_list_item_children(out, &item.children, base_dir, depth + 1);
-    }
-}
+/// チェックリストの枠（フォントに頼らず図形で描く）
+const TASK_BOX_UNCHECKED: &str = "#box(width: 0.85em, height: 0.85em, stroke: 0.6pt + rgb(\"#5f6368\"), radius: 1.5pt, baseline: 0.12em)";
+/// チェック済みの枠（✓を2本の線で描く）
+const TASK_BOX_CHECKED: &str = "#box(width: 0.85em, height: 0.85em, stroke: 0.6pt + rgb(\"#5f6368\"), radius: 1.5pt, baseline: 0.12em)[#place(line(start: (0.17em, 0.45em), end: (0.36em, 0.64em), stroke: 0.9pt))#place(line(start: (0.36em, 0.64em), end: (0.7em, 0.2em), stroke: 0.9pt))]";
 
-fn render_list_item_children(
+/// リストをTypstの関数形式（`#list(...)` / `#enum(...)`）で出力する。
+/// 項目ごとに内容ブロック `[...]` を渡す形にすることで、開始番号・入れ子・
+/// 項目内の段落やコードブロックを、インデントの深さに頼らず確実に表現できる
+fn render_list(
     out: &mut String,
-    children: &[Block],
+    ordered: bool,
+    start: u64,
+    items: &[ListItem],
     base_dir: Option<&Path>,
-    depth: usize,
 ) {
-    for child in children {
-        if let Block::List { ordered, items, .. } = child {
-            render_list_items(out, items, *ordered, base_dir, depth);
-        }
+    // すべての項目がチェックリストなら、行頭記号を出さずに枠だけを並べる
+    let all_tasks = !ordered && !items.is_empty() && items.iter().all(|i| i.checked.is_some());
+    if ordered {
+        let _ = write!(out, "#enum(start: {start}");
+    } else if all_tasks {
+        out.push_str("#list(marker: [], body-indent: 0pt");
+    } else {
+        out.push_str("#list(");
     }
+    let mut first = !ordered && !all_tasks;
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            out.push_str(", ");
+        }
+        out.push_str("\n  [");
+        match item.checked {
+            Some(true) => {
+                out.push_str(TASK_BOX_CHECKED);
+                out.push(' ');
+            }
+            Some(false) => {
+                out.push_str(TASK_BOX_UNCHECKED);
+                out.push(' ');
+            }
+            None => {}
+        }
+        render_inlines(out, &item.content, base_dir);
+        for child in &item.children {
+            // 子ブロックは段落区切りで続ける（`render_block` は末尾に空行を付けるので詰める）
+            let mut child_src = String::new();
+            render_block(&mut child_src, child, base_dir);
+            out.push_str("\n\n");
+            out.push_str(child_src.trim_end());
+        }
+        out.push(']');
+    }
+    out.push_str("\n)");
 }
 
 fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>) {
@@ -584,6 +602,35 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                     offset_y.as_deref(),
                     base_dir,
                 );
+            }
+            // 脚注はすべて「目次の中では何も出さない」形で包む。見出しの中の脚注は目次にも
+            // 複製されるため、そのままだと同じ注がページ下部に2回載ってしまう
+            //
+            // 同じ脚注を2回目以降に参照した箇所は、新しい注を作らず最初の注と同じ番号を上付きで出す。
+            // 番号は最初の脚注の直後で `state` に記録しておく（ラベルは目次への複製で重複してしまう）
+            Inline::Footnote {
+                id, repeat: true, ..
+            } => {
+                let _ = write!(
+                    out,
+                    "#context if not state(\"typer-in-outline\", false).get() {{ super(str(state(\"typer-fn-{id}\", 0).get())) }}"
+                );
+            }
+            Inline::Footnote {
+                id,
+                content,
+                repeat: false,
+            } => {
+                out.push_str("#context if not state(\"typer-in-outline\", false).get() [#footnote[");
+                render_inlines(out, content, base_dir);
+                let _ = write!(
+                    out,
+                    "]#context state(\"typer-fn-{id}\", 0).update(counter(footnote).get().first())]"
+                );
+            }
+            // 解析の最後で `Footnote` か文字列に置き換わっているはずだが、念のため元の表記で出す
+            Inline::FootnoteRef(label) => {
+                escape_typst_text(out, &format!("[^{label}]"));
             }
             Inline::SoftBreak => {
                 out.push(' ');
@@ -879,16 +926,12 @@ mod tests {
         let doc = parse_document(src);
         let out = generate_typst_source(&doc);
         assert!(
-            out.contains("- 親項目1"),
-            "親項目1のテキストが出力に含まれるはず:\n{out}"
+            out.contains("[親項目1\n\n#list(\n  [子項目1\\-1]\n)]"),
+            "親項目1の中に入れ子リストが入るはず:\n{out}"
         );
         assert!(
-            out.contains("- 親項目2"),
+            out.contains("[親項目2]"),
             "親項目2のテキストが出力に含まれるはず:\n{out}"
-        );
-        assert!(
-            out.contains("  - 子項目1\\-1"),
-            "入れ子項目がインデント付きで出力されるはず:\n{out}"
         );
     }
 
@@ -1142,20 +1185,120 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_list_default_start_uses_plain_enum_shorthand() {
+    fn test_ordered_list_default_start_uses_enum_function_form() {
         let doc = parse_document("1. 一番目\n2. 二番目\n");
         let code = generate_typst_source(&doc);
-        assert!(code.contains("+ 一番目"));
-        assert!(code.contains("+ 二番目"));
-        assert!(!code.contains("#enum(start:"));
+        assert!(code.contains("#enum(start: 1, \n  [一番目], \n  [二番目]\n)"), "{code}");
     }
 
     #[test]
     fn test_ordered_list_custom_start_uses_enum_function_form() {
         let doc = parse_document("5. 五番目\n6. 六番目\n");
         let code = generate_typst_source(&doc);
-        assert!(code.contains("#enum(start: 5)"));
+        assert!(code.contains("#enum(start: 5,"));
         assert!(code.contains("[五番目]"));
         assert!(code.contains("[六番目]"));
+    }
+}
+
+/// Milestone 13（リスト・チェックリスト・脚注）のTypst出力テスト
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn body(src: &str) -> String {
+        // 先頭の `#set` / `#show` の設定部分を除いた本文だけを比べる
+        let mut out = String::new();
+        for block in &parse_document(src).blocks {
+            render_block(&mut out, block, None);
+        }
+        out.trim().to_string()
+    }
+
+    #[test]
+    fn loose_list_items_have_their_text() {
+        assert_eq!(body("- a\n\n- b\n"), "#list(\n  [a], \n  [b]\n)");
+    }
+
+    #[test]
+    fn code_block_and_paragraph_go_inside_item() {
+        let out = body("1. 手順\n\n   続き\n\n   ```\n   cmd\n   ```\n2. 次\n");
+        assert!(out.starts_with("#enum(start: 1, \n  [手順\n\n続き\n\n#block("), "{out}");
+        assert!(out.contains("```\ncmd\n```]], \n  [次]\n)"), "{out}");
+    }
+
+    #[test]
+    fn code_block_first_word_is_not_taken_as_language() {
+        let out = body("```\ncmd --flag\n2行目\n```\n");
+        assert!(out.contains("[\n```\ncmd --flag\n2行目\n```]"), "{out}");
+        let out = body("```rust\nfn main() {}\n```\n");
+        assert!(out.contains("[\n```\nfn main() {}\n```]"), "{out}");
+    }
+
+    #[test]
+    fn custom_start_with_nested_list_is_well_formed() {
+        let out = body("3. a\n   - x\n4. b\n");
+        assert_eq!(out, "#enum(start: 3, \n  [a\n\n#list(\n  [x]\n)], \n  [b]\n)");
+    }
+
+    #[test]
+    fn task_list_hides_bullets_and_draws_boxes() {
+        let out = body("- [ ] 未\n- [x] 済\n");
+        assert!(out.starts_with("#list(marker: [], body-indent: 0pt, \n  [#box("), "{out}");
+        assert!(out.contains(&format!("[{TASK_BOX_UNCHECKED} 未]")));
+        assert!(out.contains(&format!("[{TASK_BOX_CHECKED} 済]")));
+    }
+
+    #[test]
+    fn mixed_task_list_keeps_bullets() {
+        let out = body("- [ ] 未\n- 普通\n");
+        assert!(out.starts_with("#list(\n"), "{out}");
+        assert!(out.contains("[普通]"));
+    }
+
+    #[test]
+    fn footnote_becomes_typst_footnote() {
+        let out = body("本文[^1]です\n\n[^1]: 注の*強調*\n");
+        assert_eq!(
+            out,
+            "本文#context if not state(\"typer-in-outline\", false).get() [#footnote[注の#emph[強調]]#context state(\"typer-fn-0\", 0).update(counter(footnote).get().first())]です"
+        );
+    }
+
+    #[test]
+    fn repeated_footnote_reference_points_to_first_note() {
+        let out = body("一[^a]、二[^b]、再び[^a]\n\n[^a]: 注A\n\n[^b]: 注B\n");
+        assert_eq!(
+            out,
+            "一#context if not state(\"typer-in-outline\", false).get() [#footnote[注A]#context state(\"typer-fn-0\", 0).update(counter(footnote).get().first())]、\
+二#context if not state(\"typer-in-outline\", false).get() [#footnote[注B]#context state(\"typer-fn-1\", 0).update(counter(footnote).get().first())]、\
+再び#context if not state(\"typer-in-outline\", false).get() { super(str(state(\"typer-fn-0\", 0).get())) }"
+        );
+    }
+
+    #[test]
+    fn nested_quote_renders_quote_inside_quote() {
+        let out = body("> 外\n>\n> > 内\n");
+        assert_eq!(out.matches("#block(width: 100%, fill: rgb(\"#f8f9fa\")").count(), 2);
+        assert!(out.contains("[外\n\n#block("), "{out}");
+        assert!(out.contains("[内]]"), "{out}");
+    }
+
+    #[test]
+    fn quote_inside_columns_renders_inside_columns() {
+        let out = body(":::columns 2\n\n> 引用\n\n本文\n\n:::columns-end\n");
+        assert!(out.starts_with("#columns(2, gutter: 18pt)[\n#block("), "{out}");
+    }
+
+    #[test]
+    fn soft_break_in_item_becomes_space() {
+        assert_eq!(body("- hello\n  world\n"), "#list(\n  [hello world]\n)");
+    }
+
+    #[test]
+    fn brackets_in_item_text_are_escaped() {
+        let out = body("- 角[括弧]と]だけ\n");
+        assert!(out.contains("[角\\[括弧\\]と\\]だけ]"), "{out}");
     }
 }

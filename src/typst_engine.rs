@@ -816,7 +816,7 @@ mod tests {
         let src = "5. 五番目の項目\n6. 六番目の項目\n";
         let doc = parse_document(src);
         let typst_code = generate_typst_source(&doc);
-        assert!(typst_code.contains("#enum(start: 5)"));
+        assert!(typst_code.contains("#enum(start: 5,"));
 
         let mut engine = TypstEngine::new();
         let preview = engine
@@ -900,6 +900,61 @@ mod tests {
                 preview.pages.len(),
                 pdf_bytes.len()
             );
+        }
+    }
+}
+
+/// Milestone 13 の記法をすべて含む原稿が、実際にTypstでコンパイル・PDF出力できることを確かめる
+#[cfg(test)]
+mod structure_compile_tests {
+    use super::*;
+    use crate::parser::parse_document;
+    use crate::typst_gen::generate_typst_source;
+
+    const ALL_STRUCTURES: &str = "# 見出し\n\n\
+- 空行を\n\n- 挟んだリスト\n\n\
+1. 手順\n\n   説明の段落\n\n   ```\n   cmd --flag\n   ```\n\n   > 項目内の引用\n\n   | A | B |\n   |---|---|\n   | 1 | 2 |\n2. 次の手順\n\n\
+3. 三から\n   - 入れ子\n     1. さらに[^n]\n4. 四\n\n\
+> 外側\n>\n> > 内側\n> >\n> > - 引用内のリスト\n\n\
+:::columns 2\n\n> 段組み内の引用\n\n本文\n\n:::columns-end\n\n\
+- [ ] 未完了\n- [x] 完了\n  - [ ] 子のタスク\n\n\
+- [x] 混在\n- 普通の項目\n\n\
+脚注[^n]と、もう一つ[^m]、未定義[^x]。\n\n\
+| 表 | 脚注 |\n|---|---|\n| セル | [赤字の注[^m]]{red} |\n\n\
+[^n]: 一つ目の注（**太字**と $x^2$）\n\n\
+[^m]: 二つ目の注\n\n    二段落目\n\n\
+:::columns 2\n\n閉じ忘れの段組み\n";
+
+    #[test]
+    fn all_new_structures_compile_to_pdf() {
+        let doc = parse_document(ALL_STRUCTURES);
+        let typst_code = generate_typst_source(&doc);
+        let mut engine = TypstEngine::new();
+        let preview = engine
+            .render_preview(&typst_code, 1.0)
+            .unwrap_or_else(|e| panic!("プレビューが描画できるはず: {e}\n{typst_code}"));
+        assert!(!preview.pages.is_empty());
+        let pdf = engine
+            .export_pdf(&typst_code)
+            .unwrap_or_else(|e| panic!("PDF出力できるはず: {e}\n{typst_code}"));
+        assert!(pdf.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn task_boxes_and_footnotes_compile_standalone() {
+        for src in [
+            "- [ ] a\n- [x] b\n",
+            "1. [x] 番号付きのタスク\n",
+            "- [x] **太字**のタスク\n\n  続き\n",
+            "本文[^1]\n\n[^1]: 注\n",
+            "# 見出しに脚注[^1]\n\n[^1]: 注\n",
+            ":::toc\n\n# 見出し[^1]\n\n本文でも[^1]\n\n[^1]: 目次と2回目の参照\n",
+            "| A | B |\n|---|---|\n| 表[^1] | また[^1] |\n\n[^1]: 表の中の注\n",
+        ] {
+            let typst_code = generate_typst_source(&parse_document(src));
+            TypstEngine::new()
+                .export_pdf(&typst_code)
+                .unwrap_or_else(|e| panic!("{src:?} がコンパイルできるはず: {e}\n{typst_code}"));
         }
     }
 }

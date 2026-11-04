@@ -138,11 +138,14 @@ impl BlockAttributes {
     }
 }
 
-/// リストの1項目。入れ子リスト（`children`内の`Block::List`）を保持できる
-#[derive(Debug, Clone, PartialEq)]
+/// リストの1項目。項目の本文（最初の段落）に加えて、その下に書かれた
+/// 入れ子リスト・続きの段落・コードブロック・引用などを `children` に保持する
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ListItem {
     pub content: Vec<Inline>,
     pub children: Vec<Block>,
+    /// チェックリストの項目（`- [ ]` / `- [x]`）なら `Some(チェック済みか)`
+    pub checked: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +242,17 @@ pub enum Inline {
         tex: String,
         display: bool,
     },
+    /// 脚注（`本文[^1]` ＋ `[^1]: 注記`）。定義の中身を参照位置に持たせる。
+    /// `id` は文書中で最初に参照された順の通し番号（0始まり）。同じ脚注を2回目以降に
+    /// 参照した箇所は `repeat: true` になり、各出力形式は新しい注を作らず同じ番号を指す
+    Footnote {
+        id: usize,
+        content: Vec<Inline>,
+        repeat: bool,
+    },
+    /// 解析途中だけ使う、定義との対応付け前の脚注参照（`[^ラベル]`）。
+    /// `parse_document` の最後に `Footnote` か元の文字列に置き換わるため、出力層には届かない
+    FootnoteRef(String),
     SoftBreak,
     HardBreak,
 }

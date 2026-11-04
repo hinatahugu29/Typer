@@ -7,6 +7,7 @@ use crate::model::{
     Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
 };
 use crate::typst_gen::resolve_local_image_path;
+use std::cell::RefCell;
 use std::fmt::Write;
 use std::path::Path;
 
@@ -23,14 +24,18 @@ struct Ctx<'a> {
     settings: &'a DocumentSettings,
     /// `[...]{red}` 等の内側にいるときの文字色（数式画像の色に使う）
     color: Option<&'a str>,
+    /// 出現順に集めた脚注の中身（HTML化済み）。文末の注記一覧に使う
+    footnotes: &'a RefCell<Vec<Option<String>>>,
 }
 
 pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> String {
     let mut body = String::with_capacity(4096);
+    let footnotes = RefCell::new(Vec::new());
     let ctx = Ctx {
         base_dir,
         settings: &doc.settings,
         color: None,
+        footnotes: &footnotes,
     };
 
     let toc_entries = collect_toc_entries(&doc.blocks);
@@ -44,6 +49,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
             &mut heading_counter,
         );
     }
+    render_footnote_section(&mut body, &footnotes.borrow());
 
     let s = &doc.settings;
     let font_family = match &s.font_choice {
@@ -267,6 +273,25 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
   .toc .toc-level-4 {{ padding-left: 3.6em; }}
   .toc .toc-level-5 {{ padding-left: 4.8em; }}
   .toc .toc-level-6 {{ padding-left: 6em; }}
+  li.task-item {{
+    list-style: none;
+  }}
+  li.task-item > input[type="checkbox"] {{
+    margin: 0 0.35em 0 -1.3em;
+    vertical-align: -0.1em;
+  }}
+  .footnote-ref a {{
+    text-decoration: none;
+  }}
+  .footnotes {{
+    margin-top: 2em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--border-color);
+    font-size: 0.85em;
+  }}
+  .footnote-back {{
+    text-decoration: none;
+  }}
   .doc-header, .doc-footer {{
     font-size: 0.8em;
     color: #5f6368;
@@ -368,12 +393,22 @@ fn render_html_block(
                 let _ = writeln!(out, "<ul{style}>");
             }
             for item in items {
-                out.push_str("  <li>");
-                render_html_inlines(out, &item.content, ctx);
-                for child in &item.children {
-                    if let Block::List { .. } = child {
-                        render_html_block(out, child, ctx, toc_entries, heading_counter);
+                match item.checked {
+                    Some(checked) => {
+                        let checked_attr = if checked { " checked" } else { "" };
+                        let _ = write!(
+                            out,
+                            "  <li class=\"task-item\"><input type=\"checkbox\" disabled{checked_attr}> "
+                        );
                     }
+                    None => out.push_str("  <li>"),
+                }
+                render_html_inlines(out, &item.content, ctx);
+                if !item.children.is_empty() {
+                    out.push('\n');
+                }
+                for child in &item.children {
+                    render_html_block(out, child, ctx, toc_entries, heading_counter);
                 }
                 out.push_str("</li>\n");
             }
@@ -526,6 +561,12 @@ fn collect_toc_entries_into(blocks: &[Block], out: &mut Vec<TocEntry>) {
             }
             Block::BlockQuote { blocks, .. } => collect_toc_entries_into(blocks, out),
             Block::Columns { blocks, .. } => collect_toc_entries_into(blocks, out),
+            // リスト項目の中の見出しも、描画時と同じ順番で数える（idがずれないように）
+            Block::List { items, .. } => {
+                for item in items {
+                    collect_toc_entries_into(&item.children, out);
+                }
+            }
             _ => {}
         }
     }
@@ -810,10 +851,57 @@ fn render_html_inlines(out: &mut String, inlines: &[Inline], ctx: Ctx<'_>) {
                     );
                 }
             }
+            Inline::Footnote {
+                id,
+                content,
+                repeat,
+            } => {
+                let number = id + 1;
+                if *repeat {
+                    // 2回目以降の参照は同じ番号の注を指す（注からの戻り先は最初の参照）
+                    let _ = write!(
+                        out,
+                        "<sup class=\"footnote-ref\"><a href=\"#fn{number}\">{number}</a></sup>"
+                    );
+                } else {
+                    // 中身を先に描画する（中身の描画中は脚注一覧を借用しないようにするため）
+                    let mut note = String::new();
+                    render_html_inlines(&mut note, content, ctx);
+                    {
+                        let mut notes = ctx.footnotes.borrow_mut();
+                        if notes.len() <= *id {
+                            notes.resize(id + 1, None);
+                        }
+                        notes[*id].get_or_insert(note);
+                    }
+                    let _ = write!(
+                        out,
+                        "<sup class=\"footnote-ref\"><a href=\"#fn{number}\" id=\"fnref{number}\">{number}</a></sup>"
+                    );
+                }
+            }
+            Inline::FootnoteRef(label) => out.push_str(&html_escape(&format!("[^{label}]"))),
             Inline::SoftBreak => out.push('\n'),
             Inline::HardBreak => out.push_str("<br>\n"),
         }
     }
+}
+
+/// 本文の末尾に脚注の一覧を置く（本文の参照番号と相互にリンクする）
+fn render_footnote_section(out: &mut String, notes: &[Option<String>]) {
+    if notes.iter().all(Option::is_none) {
+        return;
+    }
+    out.push_str("<section class=\"footnotes\">\n<ol>\n");
+    for (i, note) in notes.iter().enumerate() {
+        let Some(note) = note else { continue };
+        let n = i + 1;
+        let _ = writeln!(
+            out,
+            "  <li id=\"fn{n}\" value=\"{n}\">{note} <a href=\"#fnref{n}\" class=\"footnote-back\" aria-label=\"本文に戻る\">↩</a></li>"
+        );
+    }
+    out.push_str("</ol>\n</section>\n");
 }
 
 fn encode_base64(input: &[u8]) -> String {
@@ -1107,5 +1195,88 @@ mod tests {
         assert!(html.contains("raw-typst-note"));
         assert!(html.contains("HTML出力では実行されません"));
         assert!(html.contains("#line(length: 50%)"));
+    }
+}
+
+/// Milestone 13（リスト・引用・チェックリスト・脚注）のHTML出力テスト
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn html(src: &str) -> String {
+        generate_html(&parse_document(src))
+    }
+
+    #[test]
+    fn loose_list_items_have_text_and_no_stray_paragraphs() {
+        let out = html("- a\n\n- b\n");
+        assert!(out.contains("<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>"), "{out}");
+        assert!(!out.contains("<p>a</p>"));
+    }
+
+    #[test]
+    fn item_children_render_inside_li_in_order() {
+        let out = html("1. 手順\n\n   続き\n\n   ```\n   cmd\n   ```\n2. 次\n");
+        assert!(
+            out.contains("<li>手順\n<p>続き</p>\n<pre><code>cmd\n</code></pre>\n</li>"),
+            "{out}"
+        );
+        assert!(out.contains("<li>次</li>"));
+    }
+
+    #[test]
+    fn custom_start_nested_list() {
+        let out = html("3. a\n   - x\n4. b\n");
+        assert!(out.contains("<ol start=\"3\">\n  <li>a\n<ul>\n  <li>x</li>\n</ul>\n</li>"), "{out}");
+    }
+
+    #[test]
+    fn nested_blockquote() {
+        let out = html("> 外\n>\n> > 内\n");
+        assert!(
+            out.contains("<blockquote>\n<p>外</p>\n<blockquote>\n<p>内</p>\n</blockquote>\n</blockquote>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn quote_inside_columns() {
+        let out = html(":::columns 2\n\n> 引用\n\n:::columns-end\n");
+        assert!(out.contains("column-count: 2; column-gap: 2rem;\">\n<blockquote>"), "{out}");
+    }
+
+    #[test]
+    fn task_items_render_disabled_checkboxes() {
+        let out = html("- [ ] 未\n- [x] 済\n");
+        assert!(out.contains("<li class=\"task-item\"><input type=\"checkbox\" disabled> 未</li>"), "{out}");
+        assert!(out.contains("<li class=\"task-item\"><input type=\"checkbox\" disabled checked> 済</li>"));
+    }
+
+    #[test]
+    fn footnotes_are_numbered_and_listed_at_end_with_links() {
+        let out = html("一[^a]、二[^b]、再び[^a]\n\n[^a]: 注A\n\n[^b]: 注*B*\n");
+        assert!(out.contains("一<sup class=\"footnote-ref\"><a href=\"#fn1\" id=\"fnref1\">1</a></sup>"), "{out}");
+        assert!(out.contains("<a href=\"#fn2\" id=\"fnref2\">2</a>"));
+        // 同じ脚注への2回目の参照は、新しい注を作らず1番を指す（idは重複させない）
+        assert!(out.contains("再び<sup class=\"footnote-ref\"><a href=\"#fn1\">1</a></sup>"), "{out}");
+        assert!(!out.contains("fn3"));
+        assert_eq!(out.matches("id=\"fnref1\"").count(), 1);
+        assert!(out.contains("<li id=\"fn1\" value=\"1\">注A <a href=\"#fnref1\""));
+        assert!(out.contains("<li id=\"fn2\" value=\"2\">注<em>B</em> <a href=\"#fnref2\""));
+        // 一覧は本文の後ろ（フッターより前）に1つだけ
+        assert_eq!(out.matches("<section class=\"footnotes\">").count(), 1);
+    }
+
+    #[test]
+    fn no_footnote_section_without_footnotes() {
+        assert!(!html("本文\n").contains("<section class=\"footnotes\">"));
+    }
+
+    #[test]
+    fn heading_inside_list_keeps_toc_ids_aligned() {
+        let out = html(":::toc\n\n- 項目\n\n  ## 項目内の見出し\n\n## 後の見出し\n");
+        assert!(out.contains("<h2 id=\"toc-heading-0\">項目内の見出し</h2>"), "{out}");
+        assert!(out.contains("<h2 id=\"toc-heading-1\">後の見出し</h2>"), "{out}");
     }
 }

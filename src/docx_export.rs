@@ -28,9 +28,53 @@ struct DocxImageCollector {
     images: Vec<EmbeddedImage>,
     /// 数式を本文と同じフォント・文字サイズで画像化するために使う
     settings: DocumentSettings,
+    /// いま描画中のブロックに足す左インデント（引用の中・リスト項目の子ブロックなど。twip）
+    indent_twips: i64,
+    /// いま描画中のリストの入れ子の深さ（Wordの段落番号のレベル `ilvl` に使う）
+    list_depth: u32,
+    /// `numbering.xml` に書き出す番号付け定義。リスト1つにつき1件（番号を振り直すため）
+    nums: Vec<NumInstance>,
+    /// `footnotes.xml` に書き出す脚注の段落内ランXML（出現順。脚注IDは1始まり）
+    footnotes: Vec<String>,
+    /// 文書内の脚注の通し番号 → Wordの脚注ID（同じ脚注への2回目以降の参照に使う）
+    footnote_ids: std::collections::HashMap<usize, usize>,
+}
+
+/// Wordの段落番号の定義1件分（`<w:num>`）
+struct NumInstance {
+    ordered: bool,
+    level: u32,
+    start: u64,
 }
 
 impl DocxImageCollector {
+    /// リスト1つ分の番号付け定義を登録し、段落から参照する `numId` を返す
+    fn add_num(&mut self, ordered: bool, level: u32, start: u64) -> usize {
+        self.nums.push(NumInstance {
+            ordered,
+            level,
+            start,
+        });
+        self.nums.len()
+    }
+
+    /// 脚注を登録し、本文から参照する脚注IDを返す
+    fn add_footnote(&mut self, content: &[Inline], base_dir: Option<&Path>) -> usize {
+        let mut runs = String::new();
+        render_docx_runs(
+            &mut runs,
+            content,
+            RunStyle {
+                size_half_pt: Some(18),
+                ..Default::default()
+            },
+            base_dir,
+            self,
+        );
+        self.footnotes.push(runs);
+        self.footnotes.len()
+    }
+
     fn push_image(&mut self, content_type: &'static str, ext: &str, bytes: Vec<u8>) -> String {
         let index = self.images.len() + 1;
         let relationship_id = format!("rIdImg{index}");
@@ -179,7 +223,7 @@ pub fn generate_docx_bytes_with_base(doc: &Document, base_dir: Option<&Path>) ->
     };
     let body_xml = render_docx_body(&doc.blocks, base_dir, &mut images);
     let document_xml = wrap_document_xml(&doc, &body_xml);
-    build_docx_zip(&document_xml, &styles_xml(doc), &images.images)
+    build_docx_zip(&document_xml, &styles_xml(doc), &images)
 }
 
 /// 文書既定フォント（和文=eastAsia、欧文=ascii/hAnsi）を `docDefaults` に定義する
@@ -260,45 +304,50 @@ fn length_to_twips(raw: &str, default_twips: i64) -> i64 {
     default_twips
 }
 
-/// リスト項目を再帰的にDOCXの段落として出力する（入れ子リスト対応）
-/// 深さごとに左インデント（`w:left`）を360twip刻みで増やして階層を表現する
-fn render_docx_list_items(
+/// 1段分のリストのインデント幅（twip）。行頭記号・番号はこの幅にぶら下げる
+const LIST_INDENT_TWIPS: i64 = 360;
+
+/// リストをWordの箇条書き・段落番号（`numbering.xml`）を使った段落として出力する。
+/// 項目の子ブロック（入れ子リスト・続きの段落・コード等）は1段深いインデントで続ける
+fn render_docx_list(
     out: &mut String,
-    items: &[crate::model::ListItem],
     ordered: bool,
     start: u64,
+    items: &[crate::model::ListItem],
+    heading_index: &mut usize,
     base_dir: Option<&Path>,
     images: &mut DocxImageCollector,
-    depth: u32,
 ) {
-    let left = 360 * (depth + 1);
-    for (i, item) in items.iter().enumerate() {
-        let prefix = if ordered {
-            format!("{}. ", start + i as u64)
-        } else {
-            "• ".to_string()
-        };
-        out.push_str(&format!(
-            "    <w:p><w:pPr><w:ind w:left=\"{left}\"/></w:pPr>"
-        ));
-        out.push_str(&format!(
-            "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
-            xml_escape(&prefix)
-        ));
+    let level = images.list_depth.min(8);
+    let num_id = images.add_num(ordered, level, start);
+    let base = images.indent_twips;
+    let left = base + LIST_INDENT_TWIPS;
+    for item in items {
+        match item.checked {
+            // チェックリストの項目は段落番号を付けず、枠の文字を行頭に置く
+            Some(checked) => {
+                let mark = if checked { "☑" } else { "☐" };
+                out.push_str(&format!(
+                    "    <w:p><w:pPr><w:ind w:left=\"{left}\" w:hanging=\"{LIST_INDENT_TWIPS}\"/></w:pPr>\
+<w:r><w:rPr><w:rFonts w:ascii=\"Segoe UI Symbol\" w:hAnsi=\"Segoe UI Symbol\" w:eastAsia=\"Segoe UI Symbol\"/></w:rPr><w:t xml:space=\"preserve\">{mark} </w:t></w:r>"
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "    <w:p><w:pPr><w:numPr><w:ilvl w:val=\"{level}\"/><w:numId w:val=\"{num_id}\"/></w:numPr><w:ind w:left=\"{left}\" w:hanging=\"{LIST_INDENT_TWIPS}\"/></w:pPr>"
+                ));
+            }
+        }
         render_docx_runs(out, &item.content, RunStyle::default(), base_dir, images);
         out.push_str("</w:p>\n");
-        for child in &item.children {
-            if let Block::List {
-                ordered: c_ordered,
-                start: c_start,
-                items: c_items,
-                ..
-            } = child
-            {
-                render_docx_list_items(
-                    out, c_items, *c_ordered, *c_start, base_dir, images, depth + 1,
-                );
+        if !item.children.is_empty() {
+            images.indent_twips = left;
+            images.list_depth += 1;
+            for child in &item.children {
+                render_docx_block(out, child, heading_index, base_dir, images);
             }
+            images.list_depth -= 1;
+            images.indent_twips = base;
         }
     }
 }
@@ -337,7 +386,7 @@ fn render_docx_block(
                 3 => 24,
                 _ => 22,
             };
-            let ind = indent_ind_attr(attrs);
+            let ind = indent_ind_attr(attrs, images.indent_twips);
             out.push_str(&format!(
                 "    <w:p><w:pPr><w:outlineLvl w:val=\"{outline_lvl}\"/><w:spacing w:before=\"240\" w:after=\"120\"/>{ind}</w:pPr>"
             ));
@@ -356,7 +405,7 @@ fn render_docx_block(
             *heading_index += 1;
         }
         Block::Paragraph { content, attrs } => {
-            let ind = indent_ind_attr(attrs);
+            let ind = indent_ind_attr(attrs, images.indent_twips);
             // `$$...$$` だけの段落は、PDFと同じく独立した数式として中央に置く
             let jc = if is_display_math_only(content) {
                 "<w:jc w:val=\"center\"/>"
@@ -366,7 +415,7 @@ fn render_docx_block(
             if ind.is_empty() && jc.is_empty() {
                 out.push_str("    <w:p>");
             } else {
-                out.push_str(&format!("    <w:p><w:pPr>{jc}{ind}</w:pPr>"));
+                out.push_str(&format!("    <w:p><w:pPr>{ind}{jc}</w:pPr>"));
             }
             render_docx_runs(out, content, RunStyle::default(), base_dir, images);
             out.push_str("</w:p>\n");
@@ -377,7 +426,7 @@ fn render_docx_block(
             items,
             ..
         } => {
-            render_docx_list_items(out, items, *ordered, *start, base_dir, images, 0);
+            render_docx_list(out, *ordered, *start, items, heading_index, base_dir, images);
         }
         Block::Table {
             headers,
@@ -389,7 +438,14 @@ fn render_docx_block(
                 .len()
                 .max(rows.first().map(|r| r.len()).unwrap_or(1))
                 .max(1);
-            out.push_str("    <w:tbl><w:tblPr><w:tblBorders>");
+            out.push_str("    <w:tbl><w:tblPr>");
+            if images.indent_twips > 0 {
+                out.push_str(&format!(
+                    "<w:tblInd w:w=\"{}\" w:type=\"dxa\"/>",
+                    images.indent_twips
+                ));
+            }
+            out.push_str("<w:tblBorders>");
             for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
                 out.push_str(&format!(
                     "<w:{edge} w:val=\"single\" w:sz=\"4\" w:color=\"9AA0A6\"/>"
@@ -443,15 +499,24 @@ fn render_docx_block(
             out.push_str("    </w:tbl>\n    <w:p/>\n");
         }
         Block::BlockQuote { blocks, .. } => {
+            // 引用は左インデントを付けて表現する（罫線囲みの再現は見送り）。
+            // 引用の中の引用・リストは、さらに内側へずらして入れ子を表す
+            let base = images.indent_twips;
+            images.indent_twips = base + 720;
             for b in blocks {
-                // 引用は左インデントを付けて表現する（罫線囲みの再現は見送り）
-                let mut inner = String::new();
-                render_docx_block(&mut inner, b, heading_index, base_dir, images);
-                out.push_str(&inner.replace("<w:pPr>", "<w:pPr><w:ind w:left=\"720\"/>"));
+                render_docx_block(out, b, heading_index, base_dir, images);
             }
+            images.indent_twips = base;
         }
         Block::CodeBlock { code, .. } => {
-            out.push_str("    <w:p><w:pPr><w:shd w:val=\"clear\" w:fill=\"F8F9FA\"/></w:pPr>");
+            let ind = if images.indent_twips > 0 {
+                format!("<w:ind w:left=\"{}\"/>", images.indent_twips)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "    <w:p><w:pPr><w:shd w:val=\"clear\" w:fill=\"F8F9FA\"/>{ind}</w:pPr>"
+            ));
             for (i, line) in code.lines().enumerate() {
                 if i > 0 {
                     out.push_str("<w:r><w:br/></w:r>");
@@ -489,12 +554,14 @@ fn render_docx_block(
     }
 }
 
-/// `attrs` の `indent_left` / `indent_right` から `<w:ind .../>` 断片を生成する（指定がなければ空文字列）
-fn indent_ind_attr(attrs: &crate::model::BlockAttributes) -> String {
-    let left = attrs
-        .indent_left
-        .as_deref()
-        .map(|v| length_to_twips(v, 0));
+/// `attrs` の `indent_left` / `indent_right` から `<w:ind .../>` 断片を生成する（指定がなければ空文字列）。
+/// `extra_left` は引用やリスト項目の中にいる分の左インデント（twip）で、`indent_left` に足し込む
+fn indent_ind_attr(attrs: &crate::model::BlockAttributes, extra_left: i64) -> String {
+    let left = match attrs.indent_left.as_deref().map(|v| length_to_twips(v, 0)) {
+        Some(l) => Some(l + extra_left),
+        None if extra_left > 0 => Some(extra_left),
+        None => None,
+    };
     let right = attrs
         .indent_right
         .as_deref()
@@ -688,6 +755,26 @@ fn collect_runs(
                     }
                 }
             }
+            // Word本来の脚注（ページ下部に番号付きで入る）として登録する
+            Inline::Footnote { id, content, .. } => {
+                match images.footnote_ids.get(id).copied() {
+                    // 同じ脚注の2回目以降の参照：Wordの脚注は1つの注に1か所からしか参照できないため、
+                    // 最初の参照と同じ番号を上付き文字で書く（Wordは脚注を出現順に1から番号付けする）
+                    Some(word_id) => out.push(RunItem::Drawing(format!(
+                        "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:t>{word_id}</w:t></w:r>"
+                    ))),
+                    None => {
+                        let word_id = images.add_footnote(content, base_dir);
+                        images.footnote_ids.insert(*id, word_id);
+                        out.push(RunItem::Drawing(format!(
+                            "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:footnoteReference w:id=\"{word_id}\"/></w:r>"
+                        )));
+                    }
+                }
+            }
+            Inline::FootnoteRef(label) => {
+                out.push(RunItem::Text(format!("[^{label}]"), style.clone()))
+            }
             Inline::SoftBreak => out.push(RunItem::Text(" ".to_string(), style.clone())),
             Inline::HardBreak => out.push(RunItem::Break),
         }
@@ -815,7 +902,7 @@ const ROOT_RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="
 </Relationships>
 "#;
 
-fn content_types_xml(images: &[EmbeddedImage]) -> String {
+fn content_types_xml(images: &[EmbeddedImage], has_footnotes: bool) -> String {
     let mut extensions: Vec<&str> = Vec::new();
     for img in images {
         let ext = match img.content_type {
@@ -840,6 +927,13 @@ fn content_types_xml(images: &[EmbeddedImage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let footnote_overrides = if has_footnotes {
+        r#"
+  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#
+    } else {
+        ""
+    };
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -849,13 +943,14 @@ fn content_types_xml(images: &[EmbeddedImage]) -> String {
 {image_defaults}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{footnote_overrides}
 </Types>
 "#
     )
 }
 
-fn document_rels_xml(images: &[EmbeddedImage]) -> String {
-    let mut relationships: Vec<String> = images
+fn image_relationships(images: &[EmbeddedImage]) -> Vec<String> {
+    images
         .iter()
         .map(|img| {
             format!(
@@ -863,13 +958,11 @@ fn document_rels_xml(images: &[EmbeddedImage]) -> String {
                 img.relationship_id, img.file_name
             )
         })
-        .collect();
-    relationships.push(
-        r#"  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#
-            .to_string(),
-    );
-    let relationships = relationships.join("\n");
+        .collect()
+}
 
+fn wrap_relationships(relationships: Vec<String>) -> String {
+    let relationships = relationships.join("\n");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -879,40 +972,142 @@ fn document_rels_xml(images: &[EmbeddedImage]) -> String {
     )
 }
 
+fn document_rels_xml(images: &[EmbeddedImage], has_footnotes: bool) -> String {
+    let mut relationships = image_relationships(images);
+    relationships.push(
+        r#"  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#
+            .to_string(),
+    );
+    relationships.push(
+        r#"  <Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#
+            .to_string(),
+    );
+    if has_footnotes {
+        relationships.push(
+            r#"  <Relationship Id="rIdFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>"#
+                .to_string(),
+        );
+        relationships.push(
+            r#"  <Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#
+                .to_string(),
+        );
+    }
+    wrap_relationships(relationships)
+}
+
+/// 箇条書き（abstractNum 0）と段落番号（abstractNum 1）の定義、
+/// およびリスト1つごとの番号付け（開始番号の指定を含む）を書き出す
+fn numbering_xml(nums: &[NumInstance]) -> String {
+    const BULLETS: [&str; 3] = ["•", "◦", "▪"];
+    let mut bullet_levels = String::new();
+    let mut decimal_levels = String::new();
+    for lvl in 0..9i64 {
+        let left = LIST_INDENT_TWIPS * (lvl + 1);
+        let bullet = BULLETS[lvl as usize % BULLETS.len()];
+        bullet_levels.push_str(&format!(
+            "<w:lvl w:ilvl=\"{lvl}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"{bullet}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{left}\" w:hanging=\"{LIST_INDENT_TWIPS}\"/></w:pPr></w:lvl>"
+        ));
+        decimal_levels.push_str(&format!(
+            "<w:lvl w:ilvl=\"{lvl}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%{}.\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{left}\" w:hanging=\"{LIST_INDENT_TWIPS}\"/></w:pPr></w:lvl>",
+            lvl + 1
+        ));
+    }
+    let mut num_xml = String::new();
+    for (i, num) in nums.iter().enumerate() {
+        let id = i + 1;
+        if num.ordered {
+            num_xml.push_str(&format!(
+                "  <w:num w:numId=\"{id}\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"{}\"><w:startOverride w:val=\"{}\"/></w:lvlOverride></w:num>\n",
+                num.level, num.start
+            ));
+        } else {
+            num_xml.push_str(&format!(
+                "  <w:num w:numId=\"{id}\"><w:abstractNumId w:val=\"0\"/></w:num>\n"
+            ));
+        }
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>{bullet_levels}</w:abstractNum>
+  <w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/>{decimal_levels}</w:abstractNum>
+{num_xml}</w:numbering>
+"#
+    )
+}
+
+/// 脚注本体（区切り線の定義2件＋本文の脚注）を書き出す
+fn footnotes_xml(notes: &[String]) -> String {
+    let mut body = String::new();
+    for (i, runs) in notes.iter().enumerate() {
+        let id = i + 1;
+        body.push_str(&format!(
+            "  <w:footnote w:id=\"{id}\"><w:p><w:r><w:rPr><w:vertAlign w:val=\"superscript\"/><w:sz w:val=\"18\"/></w:rPr><w:footnoteRef/></w:r><w:r><w:rPr><w:sz w:val=\"18\"/></w:rPr><w:t xml:space=\"preserve\"> </w:t></w:r>{runs}</w:p></w:footnote>\n"
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+{body}</w:footnotes>
+"#
+    )
+}
+
+const SETTINGS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr>
+</w:settings>
+"#;
+
 fn build_docx_zip(
     document_xml: &str,
     styles_xml: &str,
-    images: &[EmbeddedImage],
+    collected: &DocxImageCollector,
 ) -> Result<Vec<u8>, String> {
+    let images = &collected.images;
+    let has_footnotes = !collected.footnotes.is_empty();
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
     let options: zip::write::FileOptions<'_, '_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("[Content_Types].xml", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(content_types_xml(images).as_bytes())
-        .map_err(|e| e.to_string())?;
+    let mut parts: Vec<(String, Vec<u8>)> = vec![
+        (
+            "[Content_Types].xml".to_string(),
+            content_types_xml(images, has_footnotes).into_bytes(),
+        ),
+        ("_rels/.rels".to_string(), ROOT_RELS_XML.as_bytes().to_vec()),
+        ("word/document.xml".to_string(), document_xml.as_bytes().to_vec()),
+        ("word/styles.xml".to_string(), styles_xml.as_bytes().to_vec()),
+        (
+            "word/numbering.xml".to_string(),
+            numbering_xml(&collected.nums).into_bytes(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_string(),
+            document_rels_xml(images, has_footnotes).into_bytes(),
+        ),
+    ];
+    if has_footnotes {
+        parts.push((
+            "word/footnotes.xml".to_string(),
+            footnotes_xml(&collected.footnotes).into_bytes(),
+        ));
+        // 脚注の中の数式・画像も参照できるよう、本文と同じ画像の関連付けを持たせる
+        parts.push((
+            "word/_rels/footnotes.xml.rels".to_string(),
+            wrap_relationships(image_relationships(images)).into_bytes(),
+        ));
+        parts.push(("word/settings.xml".to_string(), SETTINGS_XML.as_bytes().to_vec()));
+    }
 
-    zip.start_file("_rels/.rels", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(ROOT_RELS_XML.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    zip.start_file("word/document.xml", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(document_xml.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    zip.start_file("word/styles.xml", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(styles_xml.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    zip.start_file("word/_rels/document.xml.rels", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(document_rels_xml(images).as_bytes())
-        .map_err(|e| e.to_string())?;
+    for (name, bytes) in &parts {
+        zip.start_file(name.as_str(), options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(bytes).map_err(|e| e.to_string())?;
+    }
 
     for img in images {
         zip.start_file(format!("word/media/{}", img.file_name), options)
@@ -1044,8 +1239,13 @@ mod tests {
         let mut idx = 0usize;
         let mut images = DocxImageCollector::default();
         render_docx_block(&mut out, &doc.blocks[0], &mut idx, None, &mut images);
-        assert!(out.contains(">5. <"));
-        assert!(out.contains(">6. <"));
+        // 番号は文字ではなくWordの段落番号で振り、開始番号は numbering.xml の startOverride で指定する
+        assert!(!out.contains(">5. <"));
+        assert_eq!(out.matches("<w:numId w:val=\"1\"/>").count(), 2);
+        let numbering = numbering_xml(&images.nums);
+        assert!(numbering.contains(
+            "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/><w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"5\"/>"
+        ));
     }
 
     #[test]
@@ -1064,14 +1264,28 @@ mod tests {
             :::pagebreak\n\n\
             ---\n\n\
             :::space 1em\n\n\
-            ```typst\n#line(length: 50%)\n```\n";
+            ```typst\n#line(length: 50%)\n```\n\n\
+            - [ ] 未完了\n- [x] 完了\n\n\
+            1. 手順\n\n   ```\n   cmd\n   ```\n   - 子\n2. 次\n\n\
+            > 外\n>\n> > 内\n\n\
+            脚注つき[^a]の本文\n\n[^a]: 脚注の**中身** $x^2$\n";
         let doc = parse_document(src);
         let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
 
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
 
-        for part in ["[Content_Types].xml", "_rels/.rels", "word/document.xml"] {
+        for part in [
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "word/document.xml",
+            "word/styles.xml",
+            "word/numbering.xml",
+            "word/footnotes.xml",
+            "word/settings.xml",
+            "word/_rels/document.xml.rels",
+            "word/_rels/footnotes.xml.rels",
+        ] {
             let mut file = archive.by_name(part).unwrap();
             let mut contents = String::new();
             std::io::Read::read_to_string(&mut file, &mut contents).unwrap();
@@ -1155,5 +1369,136 @@ mod tests {
         let mut contents = String::new();
         std::io::Read::read_to_string(&mut doc_xml_file, &mut contents).unwrap();
         assert!(contents.contains("TOC \\o"));
+    }
+}
+
+/// Milestone 13（Wordの本物のリスト・脚注・引用のインデント）のテスト
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn part(src: &str, name: &str) -> Option<String> {
+        let doc = parse_document(src);
+        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut file = archive.by_name(name).ok()?;
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+        Some(s)
+    }
+
+    fn document(src: &str) -> String {
+        part(src, "word/document.xml").unwrap()
+    }
+
+    #[test]
+    fn bullet_list_uses_word_numbering_not_text_bullets() {
+        let out = document("- a\n- b\n");
+        assert!(!out.contains("• "));
+        assert_eq!(
+            out.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>").count(),
+            2
+        );
+        let numbering = part("- a\n", "word/numbering.xml").unwrap();
+        assert!(numbering.contains("<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>"));
+        assert!(numbering.contains("<w:numFmt w:val=\"bullet\"/>"));
+    }
+
+    #[test]
+    fn nested_lists_use_deeper_levels_and_separate_numbering() {
+        let out = document("1. 一\n   1. 子\n2. 二\n   1. 子\n");
+        // 外側は numId 1 のレベル0、入れ子はそれぞれ別の numId（番号が1から振り直される）のレベル1
+        assert_eq!(out.matches("<w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/>").count(), 2);
+        assert!(out.contains("<w:ilvl w:val=\"1\"/><w:numId w:val=\"2\"/>"));
+        assert!(out.contains("<w:ilvl w:val=\"1\"/><w:numId w:val=\"3\"/>"));
+        assert!(out.contains("<w:ind w:left=\"720\" w:hanging=\"360\"/>"));
+        let numbering = part("1. 一\n   1. 子\n", "word/numbering.xml").unwrap();
+        assert!(numbering.contains("<w:lvlOverride w:ilvl=\"1\"><w:startOverride w:val=\"1\"/>"));
+    }
+
+    #[test]
+    fn loose_list_and_item_children_are_indented_under_item() {
+        let out = document("- a\n\n  続き\n\n  ```\n  cmd\n  ```\n");
+        assert!(out.contains("<w:p><w:pPr><w:ind w:left=\"360\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">続き</w:t>"), "{out}");
+        assert!(out.contains("<w:shd w:val=\"clear\" w:fill=\"F8F9FA\"/><w:ind w:left=\"360\"/>"));
+    }
+
+    #[test]
+    fn task_items_get_box_characters_without_numbering() {
+        let out = document("- [ ] 未\n- [x] 済\n");
+        assert!(out.contains("☐ </w:t>"));
+        assert!(out.contains("☑ </w:t>"));
+        assert!(!out.contains("<w:numPr>"));
+    }
+
+    #[test]
+    fn quote_paragraphs_are_indented_and_nested_quotes_more() {
+        let out = document("> 外\n>\n> > 内\n");
+        assert!(out.contains("<w:ind w:left=\"720\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">外"), "{out}");
+        assert!(out.contains("<w:ind w:left=\"1440\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">内"));
+    }
+
+    #[test]
+    fn list_inside_quote_is_indented_past_the_quote() {
+        let out = document("> - a\n");
+        assert!(out.contains("<w:ind w:left=\"1080\" w:hanging=\"360\"/>"), "{out}");
+    }
+
+    #[test]
+    fn table_inside_quote_gets_table_indent() {
+        let out = document("> | A |\n> |---|\n> | 1 |\n");
+        assert!(out.contains("<w:tblPr><w:tblInd w:w=\"720\" w:type=\"dxa\"/><w:tblBorders>"), "{out}");
+    }
+
+    #[test]
+    fn footnotes_become_real_word_footnotes() {
+        let src = "本文[^a]と[^b]\n\n[^a]: 注A\n\n[^b]: **注B**\n";
+        let out = document(src);
+        assert!(out.contains("<w:footnoteReference w:id=\"1\"/>"));
+        assert!(out.contains("<w:footnoteReference w:id=\"2\"/>"));
+        let notes = part(src, "word/footnotes.xml").unwrap();
+        assert!(notes.contains("<w:footnote w:type=\"separator\" w:id=\"-1\">"));
+        assert!(notes.contains("<w:footnote w:id=\"1\">"));
+        assert!(notes.contains(">注A</w:t>"));
+        assert!(notes.contains("<w:b/><w:sz w:val=\"18\"/></w:rPr><w:t xml:space=\"preserve\">注B</w:t>"));
+        let rels = part(src, "word/_rels/document.xml.rels").unwrap();
+        assert!(rels.contains("Target=\"footnotes.xml\""));
+        assert!(rels.contains("Target=\"settings.xml\""));
+        let types = part(src, "[Content_Types].xml").unwrap();
+        assert!(types.contains("/word/footnotes.xml"));
+    }
+
+    #[test]
+    fn no_footnote_parts_without_footnotes() {
+        assert!(part("本文\n", "word/footnotes.xml").is_none());
+        assert!(part("本文\n", "word/settings.xml").is_none());
+        let rels = part("本文\n", "word/_rels/document.xml.rels").unwrap();
+        assert!(!rels.contains("footnotes.xml"));
+        assert!(rels.contains("Target=\"numbering.xml\""));
+    }
+
+    #[test]
+    fn repeated_footnote_reuses_the_first_number() {
+        let src = "一[^a]、二[^b]、再び[^a]\n\n[^a]: 注A\n\n[^b]: 注B\n";
+        let out = document(src);
+        assert_eq!(out.matches("<w:footnoteReference").count(), 2);
+        assert!(out.contains("<w:vertAlign w:val=\"superscript\"/></w:rPr><w:t>1</w:t>"), "{out}");
+        let notes = part(src, "word/footnotes.xml").unwrap();
+        assert_eq!(notes.matches(">注A</w:t>").count(), 1);
+    }
+
+    #[test]
+    fn math_inside_footnote_is_referenced_from_footnote_rels() {
+        let src = "本文[^a]\n\n[^a]: $x^2$\n";
+        let notes = part(src, "word/footnotes.xml").unwrap();
+        let Some(pos) = notes.find("r:embed=\"") else {
+            // 数式を組めない環境では等幅の文字列に落ちる
+            assert!(notes.contains("$x^2$"));
+            return;
+        };
+        let id: String = notes[pos + 9..].chars().take_while(|c| *c != '"').collect();
+        let rels = part(src, "word/_rels/footnotes.xml.rels").unwrap();
+        assert!(rels.contains(&format!("Id=\"{id}\"")), "{rels}");
     }
 }

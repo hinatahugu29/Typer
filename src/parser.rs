@@ -58,6 +58,8 @@ pub fn parse_document(input: &str) -> Document {
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_MATH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
 
     let parser = Parser::new_ext(&preprocessed, options);
 
@@ -69,138 +71,126 @@ pub fn parse_document(input: &str) -> Document {
     let mut inline_stack: Vec<(InlineContainer, Vec<Inline>)> = Vec::new();
 
     let mut in_heading: Option<u8> = None;
-    let mut in_paragraph = false;
-    let mut in_blockquote = false;
-    let mut blockquote_blocks: Vec<Block> = Vec::new();
-    let mut blockquote_attrs = BlockAttributes::default();
 
-    // 入れ子リストに対応するため、リストの状態をスタックで管理する
-    // （`Tag::List`は項目内に別の`Tag::List`を含むことで入れ子を表現する）
-    struct ListFrame {
-        ordered: bool,
-        start: u64,
-        attrs: BlockAttributes,
-        items: Vec<ListItem>,
-        current_item_children: Vec<Block>,
-        // 入れ子リストの場合、このリストが開始した時点で親項目が既に蓄積していた
-        // インライン要素（例:「親項目1」のテキスト）を退避しておく。`Tag::Item`の
-        // 開始イベントは`current_inlines`を無条件にクリアするため、退避しておかないと
-        // 入れ子リストの最初の項目が始まった瞬間に親項目のテキストが失われてしまう
-        saved_inlines: Vec<Inline>,
-    }
-    let mut list_stack: Vec<ListFrame> = Vec::new();
+    // 引用・リスト・リスト項目・段組み・脚注定義の入れ子を1本のスタックで管理する。
+    // 完成したブロックは常に `emit_block` 経由で「いま開いている一番内側の入れ物」に入る
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut footnote_defs: std::collections::HashMap<String, Vec<Block>> =
+        std::collections::HashMap::new();
 
     let mut in_code_block: Option<(Option<String>, BlockAttributes)> = None;
     let mut code_buffer = String::new();
 
     let mut in_table: Option<TableState> = None;
 
-    let mut in_columns: Option<(u8, Vec<Block>)> = None;
-
     for (event, range) in parser.into_offset_iter() {
         match event {
-            Event::Start(tag) => match tag {
-                Tag::Heading { level, .. } => {
-                    in_heading = Some(heading_level_to_u8(level));
-                    current_inlines.clear();
+            Event::Start(tag) => {
+                // リスト項目の地の文（空行なしのリストでは段落で囲まれない）は、
+                // 項目内で次のブロックが始まる前に項目の本文として確定させる
+                if is_block_tag(&tag) {
+                    flush_tight_item_text(&mut stack, &mut blocks, &mut current_inlines);
                 }
-                Tag::Paragraph => {
-                    in_paragraph = true;
-                    current_inlines.clear();
-                }
-                Tag::BlockQuote(_) => {
-                    in_blockquote = true;
-                    blockquote_blocks.clear();
-                    blockquote_attrs = std::mem::take(&mut pending_attrs);
-                }
-                Tag::List(start_num) => {
-                    let ordered = start_num.is_some();
-                    let start = start_num.unwrap_or(1);
-                    // 入れ子リスト（項目内の2つ目以降のリスト）の場合、ブロック属性行は
-                    // 外側の項目テキストで既に消費されているため、ここでは常に空になる
-                    let attrs = std::mem::take(&mut pending_attrs);
-                    // 入れ子リストの場合、ここまでに親項目が蓄積したテキストを退避する
-                    // （直後に来る`Tag::Item`で`current_inlines`がクリアされてしまうため）
-                    let saved_inlines = std::mem::take(&mut current_inlines);
-                    list_stack.push(ListFrame {
-                        ordered,
-                        start,
-                        attrs,
-                        items: Vec::new(),
-                        current_item_children: Vec::new(),
-                        saved_inlines,
-                    });
-                }
-                Tag::Item => {
-                    current_inlines.clear();
-                }
-                Tag::CodeBlock(kind) => {
-                    let lang = match kind {
-                        pulldown_cmark::CodeBlockKind::Fenced(l) if !l.is_empty() => {
-                            Some(l.to_string())
+                match tag {
+                    Tag::Heading { level, .. } => {
+                        in_heading = Some(heading_level_to_u8(level));
+                        current_inlines.clear();
+                    }
+                    Tag::Paragraph => {
+                        current_inlines.clear();
+                    }
+                    Tag::BlockQuote(_) => {
+                        stack.push(Frame::Quote {
+                            blocks: Vec::new(),
+                            attrs: std::mem::take(&mut pending_attrs),
+                        });
+                    }
+                    Tag::List(start_num) => {
+                        stack.push(Frame::List {
+                            ordered: start_num.is_some(),
+                            start: start_num.unwrap_or(1),
+                            attrs: std::mem::take(&mut pending_attrs),
+                            items: Vec::new(),
+                        });
+                    }
+                    Tag::Item => {
+                        current_inlines.clear();
+                        stack.push(Frame::Item(ListItem::default()));
+                    }
+                    Tag::FootnoteDefinition(label) => {
+                        stack.push(Frame::Footnote {
+                            label: label.to_string(),
+                            blocks: Vec::new(),
+                        });
+                    }
+                    Tag::CodeBlock(kind) => {
+                        let lang = match kind {
+                            pulldown_cmark::CodeBlockKind::Fenced(l) if !l.is_empty() => {
+                                Some(l.to_string())
+                            }
+                            _ => None,
+                        };
+                        let attrs = std::mem::take(&mut pending_attrs);
+                        in_code_block = Some((lang, attrs));
+                        code_buffer.clear();
+                    }
+                    Tag::Table(alignments) => {
+                        let mapped_aligns = alignments
+                            .into_iter()
+                            .map(|a| match a {
+                                CmarkAlign::None => None,
+                                CmarkAlign::Left => Some(Alignment::Left),
+                                CmarkAlign::Center => Some(Alignment::Center),
+                                CmarkAlign::Right => Some(Alignment::Right),
+                            })
+                            .collect();
+                        let attrs = std::mem::take(&mut pending_attrs);
+                        in_table = Some(TableState {
+                            alignments: mapped_aligns,
+                            headers: Vec::new(),
+                            rows: Vec::new(),
+                            current_row: Vec::new(),
+                            in_header: false,
+                            attrs,
+                        });
+                    }
+                    Tag::TableHead => {
+                        if let Some(t) = &mut in_table {
+                            t.in_header = true;
+                            t.current_row.clear();
                         }
-                        _ => None,
-                    };
-                    let attrs = std::mem::take(&mut pending_attrs);
-                    in_code_block = Some((lang, attrs));
-                    code_buffer.clear();
-                }
-                Tag::Table(alignments) => {
-                    let mapped_aligns = alignments
-                        .into_iter()
-                        .map(|a| match a {
-                            CmarkAlign::None => None,
-                            CmarkAlign::Left => Some(Alignment::Left),
-                            CmarkAlign::Center => Some(Alignment::Center),
-                            CmarkAlign::Right => Some(Alignment::Right),
-                        })
-                        .collect();
-                    let attrs = std::mem::take(&mut pending_attrs);
-                    in_table = Some(TableState {
-                        alignments: mapped_aligns,
-                        headers: Vec::new(),
-                        rows: Vec::new(),
-                        current_row: Vec::new(),
-                        in_header: false,
-                        attrs,
-                    });
-                }
-                Tag::TableHead => {
-                    if let Some(t) = &mut in_table {
-                        t.in_header = true;
-                        t.current_row.clear();
                     }
-                }
-                Tag::TableRow => {
-                    if let Some(t) = &mut in_table {
-                        t.current_row.clear();
+                    Tag::TableRow => {
+                        if let Some(t) = &mut in_table {
+                            t.current_row.clear();
+                        }
                     }
+                    Tag::TableCell => {
+                        current_inlines.clear();
+                    }
+                    Tag::Strong => {
+                        let prev = std::mem::take(&mut current_inlines);
+                        inline_stack.push((InlineContainer::Strong, prev));
+                    }
+                    Tag::Emphasis => {
+                        let prev = std::mem::take(&mut current_inlines);
+                        inline_stack.push((InlineContainer::Emphasis, prev));
+                    }
+                    Tag::Strikethrough => {
+                        let prev = std::mem::take(&mut current_inlines);
+                        inline_stack.push((InlineContainer::Strikethrough, prev));
+                    }
+                    Tag::Link { dest_url, .. } => {
+                        let prev = std::mem::take(&mut current_inlines);
+                        inline_stack.push((InlineContainer::Link(dest_url.to_string()), prev));
+                    }
+                    Tag::Image { dest_url, .. } => {
+                        let prev = std::mem::take(&mut current_inlines);
+                        inline_stack.push((InlineContainer::Image(dest_url.to_string()), prev));
+                    }
+                    _ => {}
                 }
-                Tag::TableCell => {
-                    current_inlines.clear();
-                }
-                Tag::Strong => {
-                    let prev = std::mem::take(&mut current_inlines);
-                    inline_stack.push((InlineContainer::Strong, prev));
-                }
-                Tag::Emphasis => {
-                    let prev = std::mem::take(&mut current_inlines);
-                    inline_stack.push((InlineContainer::Emphasis, prev));
-                }
-                Tag::Strikethrough => {
-                    let prev = std::mem::take(&mut current_inlines);
-                    inline_stack.push((InlineContainer::Strikethrough, prev));
-                }
-                Tag::Link { dest_url, .. } => {
-                    let prev = std::mem::take(&mut current_inlines);
-                    inline_stack.push((InlineContainer::Link(dest_url.to_string()), prev));
-                }
-                Tag::Image { dest_url, .. } => {
-                    let prev = std::mem::take(&mut current_inlines);
-                    inline_stack.push((InlineContainer::Image(dest_url.to_string()), prev));
-                }
-                _ => {}
-            },
+            }
             Event::End(tag_end) => match tag_end {
                 TagEnd::Heading(_) => {
                     if let Some(level) = in_heading.take() {
@@ -211,35 +201,22 @@ pub fn parse_document(input: &str) -> Document {
                             content,
                             attrs,
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                        emit_block(&mut stack, &mut blocks, block);
                     }
                 }
                 TagEnd::Paragraph => {
-                    in_paragraph = false;
                     let raw_inlines = std::mem::take(&mut current_inlines);
                     // マーカー段落かどうか判定
                     if let Some(single_text) = as_single_plain_text(&raw_inlines) {
                         let trimmed = single_text.trim();
                         if trimmed == PAGEBREAK_MARKER {
                             pending_attrs = BlockAttributes::default();
-                            push_block(
-                                &mut blocks,
-                                &mut blockquote_blocks,
-                                in_blockquote,
-                                &mut in_columns,
-                                Block::PageBreak,
-                            );
+                            emit_block(&mut stack, &mut blocks, Block::PageBreak);
                             continue;
                         }
                         if trimmed == TOC_MARKER {
                             pending_attrs = BlockAttributes::default();
-                            push_block(
-                                &mut blocks,
-                                &mut blockquote_blocks,
-                                in_blockquote,
-                                &mut in_columns,
-                                Block::TableOfContents,
-                            );
+                            emit_block(&mut stack, &mut blocks, Block::TableOfContents);
                             continue;
                         }
                         if let Some(attr_str) = trimmed
@@ -253,11 +230,9 @@ pub fn parse_document(input: &str) -> Document {
                             .strip_prefix(SPACE_MARKER_PREFIX)
                             .and_then(|s| s.strip_suffix(SPACE_MARKER_SUFFIX))
                         {
-                            push_block(
+                            emit_block(
+                                &mut stack,
                                 &mut blocks,
-                                &mut blockquote_blocks,
-                                in_blockquote,
-                                &mut in_columns,
                                 Block::Spacer {
                                     height: height.to_string(),
                                 },
@@ -269,21 +244,17 @@ pub fn parse_document(input: &str) -> Document {
                             .and_then(|s| s.strip_suffix(COLUMNS_START_MARKER_SUFFIX))
                         {
                             let count = count_str.parse::<u8>().unwrap_or(2).clamp(2, 4);
-                            in_columns = Some((count, Vec::new()));
+                            stack.push(Frame::Columns {
+                                count,
+                                blocks: Vec::new(),
+                            });
                             continue;
                         }
                         if trimmed == COLUMNS_END_MARKER {
-                            if let Some((count, col_blocks)) = in_columns.take() {
-                                push_block(
-                                    &mut blocks,
-                                    &mut blockquote_blocks,
-                                    in_blockquote,
-                                    &mut in_columns,
-                                    Block::Columns {
-                                        count,
-                                        blocks: col_blocks,
-                                    },
-                                );
+                            // 段組みは、いま一番内側で開いているものだけを閉じる
+                            // （引用の中など、段組みの外側で書かれた終了指定は無視する）
+                            if matches!(stack.last(), Some(Frame::Columns { .. })) {
+                                close_top_frame(&mut stack, &mut blocks, &mut footnote_defs);
                             }
                             continue;
                         }
@@ -292,42 +263,28 @@ pub fn parse_document(input: &str) -> Document {
                     let content = expand_custom_inlines(raw_inlines);
                     let attrs = std::mem::take(&mut pending_attrs);
                     let block = Block::Paragraph { content, attrs };
-                    push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                    emit_block(&mut stack, &mut blocks, block);
                 }
                 TagEnd::BlockQuote(_) => {
-                    in_blockquote = false;
-                    let bq_blocks = std::mem::take(&mut blockquote_blocks);
-                    let attrs = std::mem::take(&mut blockquote_attrs);
-                    blocks.push(Block::BlockQuote {
-                        blocks: bq_blocks,
-                        attrs,
+                    close_through(&mut stack, &mut blocks, &mut footnote_defs, |f| {
+                        matches!(f, Frame::Quote { .. })
                     });
                 }
                 TagEnd::Item => {
-                    let content = expand_custom_inlines(std::mem::take(&mut current_inlines));
-                    if let Some(frame) = list_stack.last_mut() {
-                        let children = std::mem::take(&mut frame.current_item_children);
-                        frame.items.push(ListItem { content, children });
-                    }
+                    flush_tight_item_text(&mut stack, &mut blocks, &mut current_inlines);
+                    close_through(&mut stack, &mut blocks, &mut footnote_defs, |f| {
+                        matches!(f, Frame::Item(_))
+                    });
                 }
                 TagEnd::List(_) => {
-                    if let Some(mut frame) = list_stack.pop() {
-                        let block = Block::List {
-                            ordered: frame.ordered,
-                            start: frame.start,
-                            items: std::mem::take(&mut frame.items),
-                            attrs: std::mem::take(&mut frame.attrs),
-                        };
-                        // 退避しておいた親項目のテキストを復元する（このリストが入れ子なら、
-                        // 続く`TagEnd::Item`がこれを親項目のcontentとして回収する）
-                        current_inlines = frame.saved_inlines;
-                        if let Some(parent) = list_stack.last_mut() {
-                            // 入れ子リスト：直前の項目（既に開いている項目）の子ブロックとして追加
-                            parent.current_item_children.push(block);
-                        } else {
-                            push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
-                        }
-                    }
+                    close_through(&mut stack, &mut blocks, &mut footnote_defs, |f| {
+                        matches!(f, Frame::List { .. })
+                    });
+                }
+                TagEnd::FootnoteDefinition => {
+                    close_through(&mut stack, &mut blocks, &mut footnote_defs, |f| {
+                        matches!(f, Frame::Footnote { .. })
+                    });
                 }
                 TagEnd::CodeBlock => {
                     if let Some((lang, attrs)) = in_code_block.take() {
@@ -337,7 +294,7 @@ pub fn parse_document(input: &str) -> Document {
                         } else {
                             Block::CodeBlock { lang, code, attrs }
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                        emit_block(&mut stack, &mut blocks, block);
                     }
                 }
                 TagEnd::TableCell => {
@@ -369,7 +326,7 @@ pub fn parse_document(input: &str) -> Document {
                             rows: t.rows,
                             attrs: t.attrs,
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                        emit_block(&mut stack, &mut blocks, block);
                     }
                 }
                 TagEnd::Strong
@@ -423,9 +380,7 @@ pub fn parse_document(input: &str) -> Document {
                 current_inlines.push(math_or_literal_dollars(&tex, true, false));
             }
             Event::SoftBreak => {
-                if in_paragraph || in_heading.is_some() {
-                    current_inlines.push(Inline::SoftBreak);
-                }
+                current_inlines.push(Inline::SoftBreak);
             }
             Event::HardBreak => {
                 current_inlines.push(Inline::HardBreak);
@@ -437,21 +392,328 @@ pub fn parse_document(input: &str) -> Document {
                     current_inlines.push(Inline::HardBreak);
                 }
             }
+            Event::TaskListMarker(checked) => {
+                if let Some(Frame::Item(item)) = stack.last_mut() {
+                    item.checked = Some(checked);
+                }
+            }
+            Event::FootnoteReference(label) => {
+                current_inlines.push(Inline::FootnoteRef(label.to_string()));
+            }
             Event::Rule => {
+                flush_tight_item_text(&mut stack, &mut blocks, &mut current_inlines);
                 pending_attrs = BlockAttributes::default();
-                push_block(
-                    &mut blocks,
-                    &mut blockquote_blocks,
-                    in_blockquote,
-                    &mut in_columns,
-                    Block::HorizontalRule,
-                );
+                emit_block(&mut stack, &mut blocks, Block::HorizontalRule);
             }
             _ => {}
         }
     }
 
+    // 閉じ忘れの `:::columns` などが残っていれば、文書末で閉じる（中身を失わないように）
+    while !stack.is_empty() {
+        close_top_frame(&mut stack, &mut blocks, &mut footnote_defs);
+    }
+
+    resolve_footnotes(&mut blocks, &footnote_defs);
+
     Document { settings, blocks }
+}
+
+/// ブロックの入れ子を管理するスタックの1段
+enum Frame {
+    Quote {
+        blocks: Vec<Block>,
+        attrs: BlockAttributes,
+    },
+    List {
+        ordered: bool,
+        start: u64,
+        attrs: BlockAttributes,
+        items: Vec<ListItem>,
+    },
+    Item(ListItem),
+    Columns {
+        count: u8,
+        blocks: Vec<Block>,
+    },
+    Footnote {
+        label: String,
+        blocks: Vec<Block>,
+    },
+}
+
+/// 完成したブロックを、いま開いている一番内側の入れ物へ追加する
+fn emit_block(stack: &mut [Frame], blocks: &mut Vec<Block>, block: Block) {
+    match stack.last_mut() {
+        Some(Frame::Quote { blocks: b, .. })
+        | Some(Frame::Columns { blocks: b, .. })
+        | Some(Frame::Footnote { blocks: b, .. }) => b.push(block),
+        Some(Frame::Item(item)) => {
+            // 項目の最初の段落はその項目の本文、2つ目以降のブロックは子として持つ
+            match block {
+                Block::Paragraph { content, .. }
+                    if item.content.is_empty() && item.children.is_empty() =>
+                {
+                    item.content = content;
+                }
+                other => item.children.push(other),
+            }
+        }
+        // リストの直下に項目以外のブロックが来ることはないが、念のため捨てずに外へ出す
+        Some(Frame::List { .. }) | None => blocks.push(block),
+    }
+}
+
+/// スタックの一番上を閉じ、出来上がったブロックを1つ外側の入れ物へ渡す
+fn close_top_frame(
+    stack: &mut Vec<Frame>,
+    blocks: &mut Vec<Block>,
+    footnote_defs: &mut std::collections::HashMap<String, Vec<Block>>,
+) {
+    let Some(frame) = stack.pop() else {
+        return;
+    };
+    match frame {
+        Frame::Quote { blocks: b, attrs } => {
+            emit_block(stack, blocks, Block::BlockQuote { blocks: b, attrs });
+        }
+        Frame::List {
+            ordered,
+            start,
+            attrs,
+            items,
+        } => emit_block(
+            stack,
+            blocks,
+            Block::List {
+                ordered,
+                start,
+                items,
+                attrs,
+            },
+        ),
+        Frame::Item(item) => match stack.last_mut() {
+            Some(Frame::List { items, .. }) => items.push(item),
+            // 項目がリストの外に取り残されることはないが、念のため本文として残す
+            _ => {
+                emit_block(
+                    stack,
+                    blocks,
+                    Block::Paragraph {
+                        content: item.content,
+                        attrs: BlockAttributes::default(),
+                    },
+                );
+                for child in item.children {
+                    emit_block(stack, blocks, child);
+                }
+            }
+        },
+        Frame::Columns { count, blocks: b } => {
+            emit_block(stack, blocks, Block::Columns { count, blocks: b });
+        }
+        Frame::Footnote { label, blocks: b } => {
+            footnote_defs.entry(label).or_insert(b);
+        }
+    }
+}
+
+/// `is_target` に当てはまる段までスタックを閉じる（途中で閉じ忘れの段組み等があれば一緒に閉じる）。
+/// 当てはまる段がなければ何もしない
+fn close_through(
+    stack: &mut Vec<Frame>,
+    blocks: &mut Vec<Block>,
+    footnote_defs: &mut std::collections::HashMap<String, Vec<Block>>,
+    is_target: impl Fn(&Frame) -> bool,
+) {
+    if !stack.iter().any(&is_target) {
+        return;
+    }
+    while let Some(top) = stack.last() {
+        let done = is_target(top);
+        close_top_frame(stack, blocks, footnote_defs);
+        if done {
+            break;
+        }
+    }
+}
+
+/// 段落で囲まれていないリスト項目の地の文を、項目の本文（または続きの段落）として確定させる
+fn flush_tight_item_text(stack: &mut [Frame], blocks: &mut Vec<Block>, inlines: &mut Vec<Inline>) {
+    if !matches!(stack.last(), Some(Frame::Item(_))) {
+        return;
+    }
+    let raw = std::mem::take(inlines);
+    let content = expand_custom_inlines(raw);
+    let only_whitespace = content.iter().all(|i| match i {
+        Inline::Text(t) => t.trim().is_empty(),
+        Inline::SoftBreak | Inline::HardBreak => true,
+        _ => false,
+    });
+    if only_whitespace {
+        return;
+    }
+    emit_block(
+        stack,
+        blocks,
+        Block::Paragraph {
+            content: trim_trailing_breaks(content),
+            attrs: BlockAttributes::default(),
+        },
+    );
+}
+
+/// 地の文の末尾に残った改行（次のブロック直前の改行）を取り除く
+fn trim_trailing_breaks(mut content: Vec<Inline>) -> Vec<Inline> {
+    while matches!(content.last(), Some(Inline::SoftBreak | Inline::HardBreak)) {
+        content.pop();
+    }
+    content
+}
+
+fn is_block_tag(tag: &Tag) -> bool {
+    matches!(
+        tag,
+        Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::BlockQuote(_)
+            | Tag::List(_)
+            | Tag::CodeBlock(_)
+            | Tag::Table(_)
+            | Tag::FootnoteDefinition(_)
+            | Tag::HtmlBlock
+    )
+}
+
+/// 脚注参照（`[^ラベル]`）を定義の中身に置き換える。定義がなければ元の表記のまま文字として残す
+/// 文書の出現順（＝各出力形式が描画する順）に辿るため、最初に参照された順に通し番号を振れる
+fn resolve_footnotes(blocks: &mut [Block], defs: &std::collections::HashMap<String, Vec<Block>>) {
+    let mut ids: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for_each_inline_list(blocks, &mut |inlines| {
+        resolve_footnotes_in_inlines(inlines, defs, &mut ids);
+    });
+}
+
+fn resolve_footnotes_in_inlines(
+    inlines: &mut [Inline],
+    defs: &std::collections::HashMap<String, Vec<Block>>,
+    ids: &mut std::collections::HashMap<String, usize>,
+) {
+    for inline in inlines.iter_mut() {
+        match inline {
+            Inline::FootnoteRef(label) => {
+                *inline = match defs.get(label.as_str()) {
+                    Some(def_blocks) => {
+                        let mut content = footnote_blocks_to_inlines(def_blocks);
+                        // 脚注の中の脚注参照は入れ子にせず、元の表記に戻す
+                        unresolve_footnote_refs(&mut content);
+                        let next_id = ids.len();
+                        let repeat = ids.contains_key(label.as_str());
+                        let id = *ids.entry(label.clone()).or_insert(next_id);
+                        Inline::Footnote {
+                            id,
+                            content,
+                            repeat,
+                        }
+                    }
+                    None => Inline::Text(format!("[^{label}]")),
+                };
+            }
+            Inline::Strong(c)
+            | Inline::Emphasis(c)
+            | Inline::Strikethrough(c)
+            | Inline::Styled { content: c, .. }
+            | Inline::Link { text: c, .. } => resolve_footnotes_in_inlines(c, defs, ids),
+            _ => {}
+        }
+    }
+}
+
+fn unresolve_footnote_refs(inlines: &mut [Inline]) {
+    for inline in inlines.iter_mut() {
+        match inline {
+            Inline::FootnoteRef(label) => *inline = Inline::Text(format!("[^{label}]")),
+            Inline::Strong(c)
+            | Inline::Emphasis(c)
+            | Inline::Strikethrough(c)
+            | Inline::Styled { content: c, .. }
+            | Inline::Link { text: c, .. }
+            | Inline::Footnote { content: c, .. } => unresolve_footnote_refs(c),
+            _ => {}
+        }
+    }
+}
+
+/// 脚注の定義（複数段落・リスト等を含みうる）を、参照位置に置ける1続きのインラインにまとめる。
+/// 段落の区切りは改行にする
+fn footnote_blocks_to_inlines(blocks: &[Block]) -> Vec<Inline> {
+    let mut out = Vec::new();
+    let push_part = |out: &mut Vec<Inline>, part: &[Inline]| {
+        if part.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push(Inline::HardBreak);
+        }
+        out.extend(part.iter().cloned());
+    };
+    fn collect(blocks: &[Block], parts: &mut Vec<Vec<Inline>>) {
+        for block in blocks {
+            match block {
+                Block::Paragraph { content, .. } | Block::Heading { content, .. } => {
+                    parts.push(content.clone())
+                }
+                Block::List { items, .. } => {
+                    for item in items {
+                        parts.push(item.content.clone());
+                        collect(&item.children, parts);
+                    }
+                }
+                Block::BlockQuote { blocks, .. } | Block::Columns { blocks, .. } => {
+                    collect(blocks, parts)
+                }
+                Block::CodeBlock { code, .. } => {
+                    parts.push(vec![Inline::Code(code.trim_end().to_string())])
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    collect(blocks, &mut parts);
+    for part in &parts {
+        push_part(&mut out, part);
+    }
+    out
+}
+
+/// 文書中のすべてのインライン列（見出し・段落・リスト項目・表のセル。入れ子の中も含む）に `f` を適用する
+pub(crate) fn for_each_inline_list(blocks: &mut [Block], f: &mut dyn FnMut(&mut Vec<Inline>)) {
+    for block in blocks {
+        match block {
+            Block::Heading { content, .. } | Block::Paragraph { content, .. } => f(content),
+            Block::List { items, .. } => {
+                for item in items {
+                    f(&mut item.content);
+                    for_each_inline_list(&mut item.children, f);
+                }
+            }
+            Block::Table { headers, rows, .. } => {
+                for cell in headers.iter_mut() {
+                    f(cell);
+                }
+                for row in rows.iter_mut() {
+                    for cell in row.iter_mut() {
+                        f(cell);
+                    }
+                }
+            }
+            Block::BlockQuote { blocks, .. } | Block::Columns { blocks, .. } => {
+                for_each_inline_list(blocks, f)
+            }
+            _ => {}
+        }
+    }
 }
 
 /// GUIの設定バーで変更された `DocumentSettings` を原稿先頭のフロントマターに反映した文字列を返す
@@ -565,6 +827,7 @@ pub(crate) fn inlines_to_plain_text(inlines: &[Inline]) -> String {
             | Inline::Styled { content: c, .. }
             | Inline::Link { text: c, .. } => s.push_str(&inlines_to_plain_text(c)),
             Inline::Image { alt, .. } => s.push_str(alt),
+            Inline::Footnote { .. } | Inline::FootnoteRef(_) => {}
             Inline::SoftBreak | Inline::HardBreak => s.push(' '),
         }
     }
@@ -605,22 +868,6 @@ fn is_br_tag(html: &str) -> bool {
         html.trim().to_ascii_lowercase().as_str(),
         "<br>" | "<br/>" | "<br />"
     )
-}
-
-fn push_block(
-    blocks: &mut Vec<Block>,
-    blockquote_blocks: &mut Vec<Block>,
-    in_blockquote: bool,
-    in_columns: &mut Option<(u8, Vec<Block>)>,
-    block: Block,
-) {
-    if let Some((_, col_blocks)) = in_columns {
-        col_blocks.push(block);
-    } else if in_blockquote {
-        blockquote_blocks.push(block);
-    } else {
-        blocks.push(block);
-    }
 }
 
 fn as_single_plain_text(inlines: &[Inline]) -> Option<&str> {
@@ -1151,7 +1398,7 @@ fn expand_custom_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
             Inline::Text(s) => {
                 text_buf.push_str(&s);
             }
-            atom @ (Inline::Math { .. } | Inline::Code(_)) => {
+            atom @ (Inline::Math { .. } | Inline::Code(_) | Inline::FootnoteRef(_)) => {
                 match char::from_u32(ATOM_PLACEHOLDER_BASE + atoms.len() as u32) {
                     Some(marker) => {
                         text_buf.push(marker);
@@ -2135,6 +2382,400 @@ line-height: 1.4
                 assert!(code.contains("fn main()"));
             }
             other => panic!("Expected CodeBlock, got {other:?}"),
+        }
+    }
+}
+
+/// Milestone 13（リスト・引用・段組み・チェックリスト・脚注の構造）のテスト
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+
+    fn text(s: &str) -> Inline {
+        Inline::Text(s.to_string())
+    }
+
+    fn fnote(id: usize, repeat: bool, content: Vec<Inline>) -> Inline {
+        Inline::Footnote {
+            id,
+            content,
+            repeat,
+        }
+    }
+
+    fn only_list(doc: &Document) -> (&bool, &u64, &Vec<ListItem>) {
+        assert_eq!(doc.blocks.len(), 1, "ブロックはリスト1つだけのはず: {:?}", doc.blocks);
+        match &doc.blocks[0] {
+            Block::List {
+                ordered,
+                start,
+                items,
+                ..
+            } => (ordered, start, items),
+            other => panic!("リストのはず: {other:?}"),
+        }
+    }
+
+    fn para_text(block: &Block) -> String {
+        match block {
+            Block::Paragraph { content, .. } => inlines_to_plain_text(content),
+            other => panic!("段落のはず: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loose_list_keeps_item_text_inside_items() {
+        let doc = parse_document("- a\n\n- b\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].content, vec![text("a")]);
+        assert_eq!(items[1].content, vec![text("b")]);
+        assert!(items.iter().all(|i| i.children.is_empty()));
+    }
+
+    #[test]
+    fn loose_ordered_list_with_three_items() {
+        let doc = parse_document("1. 一\n\n2. 二\n\n3. 三\n");
+        let (ordered, start, items) = only_list(&doc);
+        assert!(*ordered);
+        assert_eq!(*start, 1);
+        let texts: Vec<_> = items.iter().map(|i| inlines_to_plain_text(&i.content)).collect();
+        assert_eq!(texts, ["一", "二", "三"]);
+    }
+
+    #[test]
+    fn continuation_paragraph_becomes_child_of_item() {
+        let doc = parse_document("- a\n\n  続き段落\n- b\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items[0].content, vec![text("a")]);
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(para_text(&items[0].children[0]), "続き段落");
+        assert_eq!(items[1].content, vec![text("b")]);
+    }
+
+    #[test]
+    fn code_block_inside_item_stays_in_item_in_order() {
+        let doc = parse_document("1. 手順\n   ```\n   cmd\n   ```\n   - 補足\n2. 次\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items[0].content, vec![text("手順")]);
+        assert_eq!(items[0].children.len(), 2);
+        match &items[0].children[0] {
+            Block::CodeBlock { code, .. } => assert_eq!(code, "cmd\n"),
+            other => panic!("コードブロックのはず: {other:?}"),
+        }
+        assert!(matches!(items[0].children[1], Block::List { .. }));
+        assert_eq!(items[1].content, vec![text("次")]);
+    }
+
+    #[test]
+    fn item_with_only_code_block_has_empty_text() {
+        let doc = parse_document("- ```\n  x\n  ```\n");
+        let (_, _, items) = only_list(&doc);
+        assert!(items[0].content.is_empty());
+        assert!(matches!(items[0].children[0], Block::CodeBlock { .. }));
+    }
+
+    #[test]
+    fn quote_heading_and_table_inside_item() {
+        let src = "- 項目\n\n  > 引用\n\n  ### 小見出し\n\n  | A | B |\n  |---|---|\n  | 1 | 2 |\n";
+        let doc = parse_document(src);
+        let (_, _, items) = only_list(&doc);
+        let kinds: Vec<_> = items[0]
+            .children
+            .iter()
+            .map(|b| match b {
+                Block::BlockQuote { .. } => "quote",
+                Block::Heading { .. } => "heading",
+                Block::Table { .. } => "table",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["quote", "heading", "table"]);
+    }
+
+    #[test]
+    fn nested_list_with_custom_start_number() {
+        let doc = parse_document("3. a\n   - x\n4. b\n");
+        let (ordered, start, items) = only_list(&doc);
+        assert!(*ordered);
+        assert_eq!(*start, 3);
+        assert_eq!(items[0].content, vec![text("a")]);
+        match &items[0].children[0] {
+            Block::List { ordered, items, .. } => {
+                assert!(!ordered);
+                assert_eq!(items[0].content, vec![text("x")]);
+            }
+            other => panic!("入れ子リストのはず: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_level_nesting_mixing_ordered_and_bullets() {
+        let doc = parse_document("- 一\n  1. 二\n     - 三\n");
+        let (_, _, items) = only_list(&doc);
+        let Block::List { ordered, items: l2, .. } = &items[0].children[0] else {
+            panic!("2段目のリストがあるはず");
+        };
+        assert!(*ordered);
+        let Block::List { items: l3, .. } = &l2[0].children[0] else {
+            panic!("3段目のリストがあるはず");
+        };
+        assert_eq!(l3[0].content, vec![text("三")]);
+    }
+
+    #[test]
+    fn nested_quote_keeps_outer_text() {
+        let doc = parse_document("> 外\n>\n> > 内\n");
+        assert_eq!(doc.blocks.len(), 1, "{:?}", doc.blocks);
+        let Block::BlockQuote { blocks, .. } = &doc.blocks[0] else {
+            panic!("引用のはず");
+        };
+        assert_eq!(para_text(&blocks[0]), "外");
+        let Block::BlockQuote { blocks: inner, .. } = &blocks[1] else {
+            panic!("内側の引用のはず");
+        };
+        assert_eq!(para_text(&inner[0]), "内");
+    }
+
+    #[test]
+    fn quote_attributes_still_apply() {
+        let doc = parse_document("{box}\n> 囲み\n");
+        match &doc.blocks[0] {
+            Block::BlockQuote { attrs, blocks } => {
+                assert!(attrs.boxed);
+                assert_eq!(para_text(&blocks[0]), "囲み");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn quote_inside_columns_stays_inside_columns() {
+        let doc = parse_document(":::columns 2\n\n> 引用\n\n本文\n\n:::columns-end\n\n後\n");
+        assert_eq!(doc.blocks.len(), 2, "{:?}", doc.blocks);
+        let Block::Columns { count, blocks } = &doc.blocks[0] else {
+            panic!("段組みのはず");
+        };
+        assert_eq!(*count, 2);
+        match &blocks[0] {
+            Block::BlockQuote { blocks, .. } => assert_eq!(para_text(&blocks[0]), "引用"),
+            other => panic!("引用のはず: {other:?}"),
+        }
+        assert_eq!(para_text(&blocks[1]), "本文");
+        assert_eq!(para_text(&doc.blocks[1]), "後");
+    }
+
+    #[test]
+    fn list_inside_columns_stays_inside_columns() {
+        let doc = parse_document(":::columns 3\n\n- a\n- b\n\n:::columns-end\n");
+        let Block::Columns { blocks, .. } = &doc.blocks[0] else {
+            panic!("段組みのはず");
+        };
+        assert!(matches!(blocks[0], Block::List { .. }));
+    }
+
+    #[test]
+    fn unclosed_columns_are_closed_at_end_without_losing_text() {
+        let doc = parse_document(":::columns 2\n\n本文A\n\n本文B\n");
+        assert_eq!(doc.blocks.len(), 1);
+        let Block::Columns { blocks, .. } = &doc.blocks[0] else {
+            panic!("段組みのはず");
+        };
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn columns_end_inside_quote_does_not_close_outer_columns() {
+        let doc = parse_document(":::columns 2\n\n> 引用\n>\n> :::columns-end\n\n続き\n\n:::columns-end\n");
+        assert_eq!(doc.blocks.len(), 1, "{:?}", doc.blocks);
+        let Block::Columns { blocks, .. } = &doc.blocks[0] else {
+            panic!("段組みのはず");
+        };
+        assert_eq!(para_text(blocks.last().unwrap()), "続き");
+    }
+
+    #[test]
+    fn list_inside_quote_with_nesting() {
+        let doc = parse_document("> - a\n>   - b\n");
+        let Block::BlockQuote { blocks, .. } = &doc.blocks[0] else {
+            panic!("引用のはず");
+        };
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("リストのはず");
+        };
+        assert_eq!(items[0].content, vec![text("a")]);
+        assert!(matches!(items[0].children[0], Block::List { .. }));
+    }
+
+    #[test]
+    fn task_list_markers_are_parsed() {
+        let doc = parse_document("- [ ] 未\n- [x] 済\n- 普通\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items[0].checked, Some(false));
+        assert_eq!(items[0].content, vec![text("未")]);
+        assert_eq!(items[1].checked, Some(true));
+        assert_eq!(items[1].content, vec![text("済")]);
+        assert_eq!(items[2].checked, None);
+    }
+
+    #[test]
+    fn loose_and_nested_task_lists() {
+        let doc = parse_document("- [X] 大文字\n\n- [ ] 親\n  - [x] 子\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items[0].checked, Some(true));
+        assert_eq!(items[0].content, vec![text("大文字")]);
+        assert_eq!(items[1].checked, Some(false));
+        let Block::List { items: sub, .. } = &items[1].children[0] else {
+            panic!("入れ子のはず");
+        };
+        assert_eq!(sub[0].checked, Some(true));
+    }
+
+    #[test]
+    fn ordered_task_list() {
+        let doc = parse_document("1. [x] 済\n2. [ ] 未\n");
+        let (ordered, _, items) = only_list(&doc);
+        assert!(*ordered);
+        assert_eq!(items[0].checked, Some(true));
+    }
+
+    #[test]
+    fn soft_break_inside_tight_item_is_kept() {
+        let doc = parse_document("- hello\n  world\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(
+            items[0].content,
+            vec![text("hello"), Inline::SoftBreak, text("world")]
+        );
+    }
+
+    #[test]
+    fn footnote_reference_is_replaced_with_definition() {
+        let doc = parse_document("本文[^1]です。\n\n[^1]: 注記\n");
+        assert_eq!(doc.blocks.len(), 1, "定義はブロックとして出ないはず: {:?}", doc.blocks);
+        let Block::Paragraph { content, .. } = &doc.blocks[0] else {
+            panic!("段落のはず");
+        };
+        assert_eq!(
+            content,
+            &vec![text("本文"), fnote(0, false, vec![text("注記")]), text("です。")]
+        );
+    }
+
+    #[test]
+    fn footnote_definition_before_reference_and_named_label() {
+        let doc = parse_document("[^memo]: 先に定義\n\n参照[^memo]\n");
+        let Block::Paragraph { content, .. } = &doc.blocks[0] else {
+            panic!("段落のはず: {:?}", doc.blocks);
+        };
+        assert_eq!(content[1], fnote(0, false, vec![text("先に定義")]));
+    }
+
+    #[test]
+    fn undefined_footnote_reference_stays_as_text() {
+        let doc = parse_document("本文[^nothing]\n");
+        let text_all = match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => inlines_to_plain_text(content),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(text_all, "本文[^nothing]");
+    }
+
+    #[test]
+    fn multi_paragraph_footnote_is_joined_with_line_breaks() {
+        let doc = parse_document("本文[^a]\n\n[^a]: 一段落目\n\n    二段落目\n");
+        let Block::Paragraph { content, .. } = &doc.blocks[0] else {
+            panic!("段落のはず: {:?}", doc.blocks);
+        };
+        assert_eq!(
+            content[1],
+            fnote(0, false, vec![text("一段落目"), Inline::HardBreak, text("二段落目")])
+        );
+    }
+
+    #[test]
+    fn footnote_with_formatting_and_inside_custom_span_and_table_and_list() {
+        let src = "[赤字[^a]]{red}\n\n| A |\n|---|\n| セル[^a] |\n\n- 項目[^a]\n\n[^a]: **太字**の注\n";
+        let doc = parse_document(src);
+        let body = vec![Inline::Strong(vec![text("太字")]), text("の注")];
+        match &doc.blocks[0] {
+            Block::Paragraph { content, .. } => match &content[0] {
+                Inline::Styled { content, .. } => {
+                    assert_eq!(content[1], fnote(0, false, body.clone()))
+                }
+                other => panic!("色付きのはず: {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        // 同じ脚注への2回目以降の参照は、同じ通し番号の繰り返しになる
+        match &doc.blocks[1] {
+            Block::Table { rows, .. } => assert_eq!(rows[0][0][1], fnote(0, true, body.clone())),
+            other => panic!("{other:?}"),
+        }
+        match &doc.blocks[2] {
+            Block::List { items, .. } => assert_eq!(items[0].content[1], fnote(0, true, body)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn footnote_ids_follow_first_reference_order() {
+        let doc = parse_document("B[^b]、A[^a]、また B[^b]\n\n[^a]: 注A\n\n[^b]: 注B\n");
+        let Block::Paragraph { content, .. } = &doc.blocks[0] else {
+            panic!();
+        };
+        let ids: Vec<_> = content
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Footnote { id, repeat, .. } => Some((*id, *repeat)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [(0, false), (1, false), (0, true)]);
+    }
+
+    #[test]
+    fn footnote_inside_footnote_is_not_nested() {
+        let doc = parse_document("本文[^a]\n\n[^a]: 注[^b]\n\n[^b]: 別の注\n");
+        let Block::Paragraph { content, .. } = &doc.blocks[0] else {
+            panic!();
+        };
+        assert_eq!(content[1], fnote(0, false, vec![text("注"), text("[^b]")]));
+    }
+
+    #[test]
+    fn html_blocks_and_comments_are_dropped_without_breaking_structure() {
+        let doc = parse_document("<div>HTML</div>\n\n<!-- メモ -->\n\n- a\n- b\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn horizontal_rule_inside_item_is_child() {
+        let doc = parse_document("- a\n\n  ***\n");
+        let (_, _, items) = only_list(&doc);
+        assert_eq!(items[0].content, vec![text("a")]);
+        assert!(matches!(items[0].children[0], Block::HorizontalRule));
+    }
+
+    #[test]
+    fn existing_markers_still_work_at_top_level() {
+        let doc = parse_document("前\n\n:::pagebreak\n\n:::toc\n\n:::space 2em\n\n後\n");
+        assert!(matches!(doc.blocks[1], Block::PageBreak));
+        assert!(matches!(doc.blocks[2], Block::TableOfContents));
+        assert!(matches!(doc.blocks[3], Block::Spacer { .. }));
+        assert_eq!(doc.blocks.len(), 5);
+    }
+
+    #[test]
+    fn list_attributes_line_applies_to_list() {
+        let doc = parse_document("{font-size: 9pt}\n- a\n- b\n");
+        match &doc.blocks[0] {
+            Block::List { attrs, items, .. } => {
+                assert_eq!(attrs.font_size.as_deref(), Some("9pt"));
+                assert_eq!(items.len(), 2);
+            }
+            other => panic!("{other:?}"),
         }
     }
 }
