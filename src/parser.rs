@@ -9,8 +9,8 @@
 //! 4. インライン装飾 (`[重要]{red}`, `[テキスト]{color: red, size: 12pt}`, `{color:red|重要}`)
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
-    Orientation,
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, ListItem, Orientation,
 };
 use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::fmt::Write;
@@ -74,8 +74,21 @@ pub fn parse_document(input: &str) -> Document {
     let mut blockquote_blocks: Vec<Block> = Vec::new();
     let mut blockquote_attrs = BlockAttributes::default();
 
-    let mut in_list: Option<(bool, u64, BlockAttributes)> = None;
-    let mut list_items: Vec<Vec<Inline>> = Vec::new();
+    // 入れ子リストに対応するため、リストの状態をスタックで管理する
+    // （`Tag::List`は項目内に別の`Tag::List`を含むことで入れ子を表現する）
+    struct ListFrame {
+        ordered: bool,
+        start: u64,
+        attrs: BlockAttributes,
+        items: Vec<ListItem>,
+        current_item_children: Vec<Block>,
+        // 入れ子リストの場合、このリストが開始した時点で親項目が既に蓄積していた
+        // インライン要素（例:「親項目1」のテキスト）を退避しておく。`Tag::Item`の
+        // 開始イベントは`current_inlines`を無条件にクリアするため、退避しておかないと
+        // 入れ子リストの最初の項目が始まった瞬間に親項目のテキストが失われてしまう
+        saved_inlines: Vec<Inline>,
+    }
+    let mut list_stack: Vec<ListFrame> = Vec::new();
 
     let mut in_code_block: Option<(Option<String>, BlockAttributes)> = None;
     let mut code_buffer = String::new();
@@ -103,9 +116,20 @@ pub fn parse_document(input: &str) -> Document {
                 Tag::List(start_num) => {
                     let ordered = start_num.is_some();
                     let start = start_num.unwrap_or(1);
+                    // 入れ子リスト（項目内の2つ目以降のリスト）の場合、ブロック属性行は
+                    // 外側の項目テキストで既に消費されているため、ここでは常に空になる
                     let attrs = std::mem::take(&mut pending_attrs);
-                    in_list = Some((ordered, start, attrs));
-                    list_items.clear();
+                    // 入れ子リストの場合、ここまでに親項目が蓄積したテキストを退避する
+                    // （直後に来る`Tag::Item`で`current_inlines`がクリアされてしまうため）
+                    let saved_inlines = std::mem::take(&mut current_inlines);
+                    list_stack.push(ListFrame {
+                        ordered,
+                        start,
+                        attrs,
+                        items: Vec::new(),
+                        current_item_children: Vec::new(),
+                        saved_inlines,
+                    });
                 }
                 Tag::Item => {
                     current_inlines.clear();
@@ -280,19 +304,29 @@ pub fn parse_document(input: &str) -> Document {
                     });
                 }
                 TagEnd::Item => {
-                    let item_inlines = expand_custom_inlines(std::mem::take(&mut current_inlines));
-                    list_items.push(item_inlines);
+                    let content = expand_custom_inlines(std::mem::take(&mut current_inlines));
+                    if let Some(frame) = list_stack.last_mut() {
+                        let children = std::mem::take(&mut frame.current_item_children);
+                        frame.items.push(ListItem { content, children });
+                    }
                 }
                 TagEnd::List(_) => {
-                    if let Some((ordered, start, attrs)) = in_list.take() {
-                        let items = std::mem::take(&mut list_items);
+                    if let Some(mut frame) = list_stack.pop() {
                         let block = Block::List {
-                            ordered,
-                            start,
-                            items,
-                            attrs,
+                            ordered: frame.ordered,
+                            start: frame.start,
+                            items: std::mem::take(&mut frame.items),
+                            attrs: std::mem::take(&mut frame.attrs),
                         };
-                        push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                        // 退避しておいた親項目のテキストを復元する（このリストが入れ子なら、
+                        // 続く`TagEnd::Item`がこれを親項目のcontentとして回収する）
+                        current_inlines = frame.saved_inlines;
+                        if let Some(parent) = list_stack.last_mut() {
+                            // 入れ子リスト：直前の項目（既に開いている項目）の子ブロックとして追加
+                            parent.current_item_children.push(block);
+                        } else {
+                            push_block(&mut blocks, &mut blockquote_blocks, in_blockquote, &mut in_columns, block);
+                        }
                     }
                 }
                 TagEnd::CodeBlock => {
@@ -1485,6 +1519,32 @@ fn normalize_color(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_nested_list_items_are_captured_as_children_not_lost() {
+        let src = "- 親1\n  - 子1-1\n  - 子1-2\n- 親2\n";
+        let doc = parse_document(src);
+        let list = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("トップレベルのリストが1つ見つかるはず");
+        assert_eq!(list.len(), 2, "外側のリスト項目は2つ（親1, 親2）のはず");
+
+        let child_list = list[0]
+            .children
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("親1の子として入れ子リストが見つかるはず");
+        assert_eq!(child_list.len(), 2, "入れ子リストの項目は2つ（子1-1, 子1-2）のはず");
+        assert!(list[1].children.is_empty(), "親2には子リストがない");
+    }
 
     #[test]
     fn test_frontmatter_font_arbitrary_name_becomes_custom_choice() {

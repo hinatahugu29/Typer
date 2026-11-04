@@ -197,20 +197,13 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
                 let _ = write!(inner, "#enum(start: {start})[\n");
                 for item in items {
                     inner.push_str("  [");
-                    render_inlines(&mut inner, item, base_dir);
+                    render_inlines(&mut inner, &item.content, base_dir);
+                    render_list_item_children(&mut inner, &item.children, base_dir, 1);
                     inner.push_str("]\n");
                 }
                 inner.push(']');
             } else {
-                for item in items {
-                    if *ordered {
-                        inner.push_str("+ ");
-                    } else {
-                        inner.push_str("- ");
-                    }
-                    render_inlines(&mut inner, item, base_dir);
-                    inner.push('\n');
-                }
+                render_list_items(&mut inner, items, *ordered, base_dir, 0);
             }
             wrap_with_block_attrs(out, inner.trim_end(), attrs);
             out.push_str("\n\n");
@@ -465,6 +458,38 @@ fn wrap_with_block_attrs(out: &mut String, content: &str, attrs: &BlockAttribute
     }
 
     out.push_str(&current);
+}
+
+/// リスト項目を再帰的にTypstマークアップへ変換する（入れ子リスト対応）
+/// Typstの箇条書き記法はインデントの深さで入れ子を表現するため、`depth`段分のスペースを付与する
+fn render_list_items(
+    out: &mut String,
+    items: &[crate::model::ListItem],
+    ordered: bool,
+    base_dir: Option<&Path>,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+    for item in items {
+        out.push_str(&indent);
+        out.push_str(if ordered { "+ " } else { "- " });
+        render_inlines(out, &item.content, base_dir);
+        out.push('\n');
+        render_list_item_children(out, &item.children, base_dir, depth + 1);
+    }
+}
+
+fn render_list_item_children(
+    out: &mut String,
+    children: &[Block],
+    base_dir: Option<&Path>,
+    depth: usize,
+) {
+    for child in children {
+        if let Block::List { ordered, items, .. } = child {
+            render_list_items(out, items, *ordered, base_dir, depth);
+        }
+    }
 }
 
 fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>) {
@@ -845,6 +870,27 @@ fn sanitize_color_hex(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::parser::parse_document;
+
+    #[test]
+    fn test_nested_list_keeps_parent_item_text_and_renders_nested_markup() {
+        // 入れ子リストの開始直後に`current_inlines`がクリアされ、親項目のテキストが
+        // 消えてしまう不具合の回帰テスト
+        let src = "- 親項目1\n  - 子項目1-1\n- 親項目2\n";
+        let doc = parse_document(src);
+        let out = generate_typst_source(&doc);
+        assert!(
+            out.contains("- 親項目1"),
+            "親項目1のテキストが出力に含まれるはず:\n{out}"
+        );
+        assert!(
+            out.contains("- 親項目2"),
+            "親項目2のテキストが出力に含まれるはず:\n{out}"
+        );
+        assert!(
+            out.contains("  - 子項目1\\-1"),
+            "入れ子項目がインデント付きで出力されるはず:\n{out}"
+        );
+    }
 
     #[test]
     fn test_escape_typst_text_escapes_special_chars() {

@@ -369,7 +369,12 @@ fn render_html_block(
             }
             for item in items {
                 out.push_str("  <li>");
-                render_html_inlines(out, item, ctx);
+                render_html_inlines(out, &item.content, ctx);
+                for child in &item.children {
+                    if let Block::List { .. } = child {
+                        render_html_block(out, child, ctx, toc_entries, heading_counter);
+                    }
+                }
                 out.push_str("</li>\n");
             }
             if *ordered {

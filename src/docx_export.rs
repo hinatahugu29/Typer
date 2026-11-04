@@ -260,6 +260,49 @@ fn length_to_twips(raw: &str, default_twips: i64) -> i64 {
     default_twips
 }
 
+/// リスト項目を再帰的にDOCXの段落として出力する（入れ子リスト対応）
+/// 深さごとに左インデント（`w:left`）を360twip刻みで増やして階層を表現する
+fn render_docx_list_items(
+    out: &mut String,
+    items: &[crate::model::ListItem],
+    ordered: bool,
+    start: u64,
+    base_dir: Option<&Path>,
+    images: &mut DocxImageCollector,
+    depth: u32,
+) {
+    let left = 360 * (depth + 1);
+    for (i, item) in items.iter().enumerate() {
+        let prefix = if ordered {
+            format!("{}. ", start + i as u64)
+        } else {
+            "• ".to_string()
+        };
+        out.push_str(&format!(
+            "    <w:p><w:pPr><w:ind w:left=\"{left}\"/></w:pPr>"
+        ));
+        out.push_str(&format!(
+            "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
+            xml_escape(&prefix)
+        ));
+        render_docx_runs(out, &item.content, RunStyle::default(), base_dir, images);
+        out.push_str("</w:p>\n");
+        for child in &item.children {
+            if let Block::List {
+                ordered: c_ordered,
+                start: c_start,
+                items: c_items,
+                ..
+            } = child
+            {
+                render_docx_list_items(
+                    out, c_items, *c_ordered, *c_start, base_dir, images, depth + 1,
+                );
+            }
+        }
+    }
+}
+
 fn render_docx_body(
     blocks: &[Block],
     base_dir: Option<&Path>,
@@ -334,20 +377,7 @@ fn render_docx_block(
             items,
             ..
         } => {
-            for (i, item) in items.iter().enumerate() {
-                let prefix = if *ordered {
-                    format!("{}. ", start + i as u64)
-                } else {
-                    "• ".to_string()
-                };
-                out.push_str("    <w:p><w:pPr><w:ind w:left=\"360\"/></w:pPr>");
-                out.push_str(&format!(
-                    "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
-                    xml_escape(&prefix)
-                ));
-                render_docx_runs(out, item, RunStyle::default(), base_dir, images);
-                out.push_str("</w:p>\n");
-            }
+            render_docx_list_items(out, items, *ordered, *start, base_dir, images, 0);
         }
         Block::Table {
             headers,

@@ -138,6 +138,13 @@ impl BlockAttributes {
     }
 }
 
+/// リストの1項目。入れ子リスト（`children`内の`Block::List`）を保持できる
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListItem {
+    pub content: Vec<Inline>,
+    pub children: Vec<Block>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Heading {
@@ -152,7 +159,7 @@ pub enum Block {
     List {
         ordered: bool,
         start: u64,
-        items: Vec<Vec<Inline>>,
+        items: Vec<ListItem>,
         attrs: BlockAttributes,
     },
     Table {
