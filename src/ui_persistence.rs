@@ -77,6 +77,91 @@ pub(crate) fn save_recent_files(files: &[PathBuf]) {
     let _ = std::fs::write(&path, content);
 }
 
+/// 終了時に保存・起動時に復元するタブ1枚分の情報（Undo/Redo履歴は持たない）
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionTab {
+    pub current_file: Option<PathBuf>,
+    pub is_dirty: bool,
+    /// 本文。未保存の変更があるタブ・ファイル未保存の新規文書のときだけ保存される
+    pub content: Option<String>,
+}
+
+/// セッション（開いていた全タブ）を保存するフォルダ
+fn session_dir() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("Typer").join("session"))
+}
+
+/// 開いている全タブをセッションフォルダへ書き出す（失敗は無視）。
+/// `session.txt` の1行目にアクティブタブ番号、以降は1タブ1行で `D|C<TAB>パス`。
+/// 本文を持つタブは `tab_<番号>.md` に本文を保存する
+pub(crate) fn save_session(tabs: &[SessionTab], active: usize) {
+    let Some(dir) = session_dir() else {
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let mut index = format!("{active}\n");
+    for (i, tab) in tabs.iter().enumerate() {
+        let flag = if tab.is_dirty { 'D' } else { 'C' };
+        let path = tab
+            .current_file
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        index.push_str(&format!("{flag}\t{path}\n"));
+        if let Some(content) = &tab.content {
+            let _ = std::fs::write(dir.join(format!("tab_{i}.md")), content);
+        }
+    }
+    let _ = std::fs::write(dir.join("session.txt"), index);
+}
+
+/// 保存されたセッションを読み込む。復元できるタブが1枚もなければ `None`。
+/// - 未保存の変更があるタブ：保存された本文を優先する（元ファイルが外部で変更されていても上書きしない）
+/// - 元ファイルが削除されていた場合：パスを外し、本文だけ残した未保存の新規文書として扱う
+/// - 変更のないファイルタブ：ディスクから最新内容を読み直す（読めなければそのタブは捨てる）
+pub(crate) fn load_session() -> Option<(Vec<SessionTab>, usize)> {
+    let dir = session_dir()?;
+    let index = std::fs::read_to_string(dir.join("session.txt")).ok()?;
+    let mut lines = index.lines();
+    let saved_active: usize = lines.next()?.trim().parse().ok()?;
+    let mut tabs = Vec::new();
+    let mut active = 0;
+    for (i, line) in lines.enumerate() {
+        let (flag, path) = line.split_once('\t').unwrap_or((line, ""));
+        let is_dirty = flag == "D";
+        let path = (!path.is_empty()).then(|| PathBuf::from(path));
+        let saved = std::fs::read_to_string(dir.join(format!("tab_{i}.md"))).ok();
+        let tab = match (path, saved) {
+            (Some(p), Some(text)) => {
+                if p.is_file() {
+                    SessionTab { current_file: Some(p), is_dirty, content: Some(text) }
+                } else {
+                    SessionTab { current_file: None, is_dirty: true, content: Some(text) }
+                }
+            }
+            (Some(p), None) => match std::fs::read_to_string(&p) {
+                Ok(text) => SessionTab { current_file: Some(p), is_dirty: false, content: Some(text) },
+                Err(_) => continue,
+            },
+            (None, Some(text)) => SessionTab { current_file: None, is_dirty, content: Some(text) },
+            (None, None) => continue,
+        };
+        if i == saved_active {
+            active = tabs.len();
+        }
+        tabs.push(tab);
+    }
+    if tabs.is_empty() {
+        None
+    } else {
+        Some((tabs, active))
+    }
+}
+
 /// 現在編集中のファイルに対応する自動保存バックアップファイルのパスを決定する。
 /// 保存済みファイルの場合は同じフォルダに `.autosave.md` 拡張で置き、
 /// 未保存の新規文書の場合はアプリ設定フォルダ内の固定ファイルへ保存する。

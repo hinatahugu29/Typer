@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use typst::WorldExt;
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, Datetime, Duration, NativeElement};
+use typst::introspection::Introspector;
+use typst::model::HeadingElem;
 use typst::layout::{Abs, Frame, FrameItem, Point};
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
@@ -74,8 +76,21 @@ pub struct RenderedPage {
     pub premultiplied_rgba: Vec<u8>,
 }
 
+/// プレビュー上の見出し1つ分の位置（アウトラインからプレビューへジャンプするために使う）
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeadingPosition {
+    /// 見出しの文字列（装飾を除いたプレーンテキスト）
+    pub text: String,
+    /// 0始まりのページ番号
+    pub page: usize,
+    /// ページ上端からの縦位置（pt）
+    pub y_pt: f32,
+}
+
 pub struct PreviewOutput {
     pub pages: Vec<RenderedPage>,
+    /// 文書中の見出しを出現順に並べた位置一覧
+    pub headings: Vec<HeadingPosition>,
     pub compile_ms: f64,
 }
 
@@ -266,8 +281,30 @@ impl TypstEngine {
             });
         }
 
+        let introspector = doc.introspector();
+        let headings = introspector
+            .query(&HeadingElem::ELEM.select())
+            .iter()
+            .filter_map(|heading| {
+                let pos = introspector.position(heading.location()?)?;
+                Some(HeadingPosition {
+                    // 要素全体の plain_text は「節」等の補足語を含むため、本文だけを取り出す
+                    text: heading
+                        .to_packed::<HeadingElem>()
+                        .map(|h| h.body.plain_text().to_string())
+                        .unwrap_or_default(),
+                    page: pos.page.get() - 1,
+                    y_pt: pos.point.y.to_pt() as f32,
+                })
+            })
+            .collect();
+
         let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
-        Ok(PreviewOutput { pages, compile_ms })
+        Ok(PreviewOutput {
+            pages,
+            headings,
+            compile_ms,
+        })
     }
 
     /// 数式1つ分のTypstソース（`typst_gen::math_snippet_source`）を組み、SVGとPNGにする
@@ -676,6 +713,18 @@ mod tests {
             .render_preview(&typst_code, 1.5)
             .expect("Preview rendering with math notation should not fail");
         assert!(!preview.pages.is_empty());
+    }
+
+    #[test]
+    fn test_preview_reports_heading_positions_in_order() {
+        let src = "# はじめに\n\n本文\n\n## **詳細**\n\n本文\n";
+        let typst_code = generate_typst_source(&parse_document(src));
+        let preview = TypstEngine::new()
+            .render_preview(&typst_code, 1.5)
+            .expect("preview should render");
+        let texts: Vec<&str> = preview.headings.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(texts, vec!["はじめに", "詳細"]);
+        assert!(preview.headings[0].y_pt < preview.headings[1].y_pt);
     }
 
     #[test]

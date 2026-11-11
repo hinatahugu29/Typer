@@ -23,14 +23,15 @@ use crate::parser::{
 };
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{
-    PreviewOutput, TypstEngine, available_font_families, available_latin_font_families,
+    HeadingPosition, PreviewOutput, TypstEngine, available_font_families, available_latin_font_families,
 };
 use crate::typst_gen::generate_typst_source_with_base;
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
 use crate::ui_persistence::{
-    autosave_path_for, load_dark_mode_setting, load_recent_files, resolve_startup_document,
-    save_dark_mode_setting, save_recent_files, setup_japanese_fonts, setup_visual_theme,
+    autosave_path_for, load_dark_mode_setting, load_recent_files, load_session,
+    resolve_startup_document, save_dark_mode_setting, save_recent_files, save_session,
+    SessionTab, setup_japanese_fonts, setup_visual_theme,
 };
 use crate::ui_text::{
     byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
@@ -144,6 +145,28 @@ struct TabSnapshot {
     last_export_path: Option<PathBuf>,
 }
 
+/// 見出し文字列を比較用に正規化する（Markdownの装飾記号や空白の差を無視し、文字と数字だけ残す）
+fn normalize_heading_text(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// アウトラインの `index` 番目（同名見出しの中では `same_title_before` 番目）の見出しに対応する
+/// プレビュー上の位置を探す。まず文字列の一致で探し、見つからなければ出現順で対応させる
+fn find_preview_heading(
+    headings: &[HeadingPosition],
+    index: usize,
+    title: &str,
+    same_title_before: usize,
+) -> Option<(usize, f32)> {
+    let key = normalize_heading_text(title);
+    headings
+        .iter()
+        .filter(|h| !key.is_empty() && normalize_heading_text(&h.text) == key)
+        .nth(same_title_before)
+        .or_else(|| headings.get(index))
+        .map(|h| (h.page, h.y_pt))
+}
+
 const BLANK_DOCUMENT_TEMPLATE: &str = "---\ntitle:\npaper: A4\norientation: portrait\nmargin: 20mm\nfont-size: 10.5pt\nline-height: 1.5\nfont: gothic\n---\n\n# 新規報告書タイトル\n\nここに本文を入力してください。\n";
 
 pub struct TyperApp {
@@ -198,6 +221,17 @@ pub struct TyperApp {
 
     /// プレビュー表示倍率（1.0 = 100%）
     zoom: f32,
+    /// プレビューをウィンドウ全幅に最大化しているか（エディタは非表示になる）
+    preview_maximized: bool,
+    /// アウトラインパネルの幅（右端のつまみをドラッグして変更する）
+    outline_width: f32,
+    /// 直近の組版結果に含まれる見出しの位置（出現順）
+    preview_headings: Vec<HeadingPosition>,
+    /// 次フレームでプレビューをスクロールさせる先（ページ番号, ページ上端からのpt）
+    pending_preview_jump: Option<(usize, f32)>,
+    /// 次にカーソル位置へエディタをスクロールするとき、その行を表示領域の上端に合わせるか
+    /// （アウトラインからのジャンプ用。通常の挿入・検索では最小限のスクロールにとどめる）
+    scroll_editor_cursor_to_top: bool,
     /// 生成されたTypstコードを確認するサブパネル表示フラグ
     show_typst_source: bool,
     /// ステータスバー通知メッセージ
@@ -318,6 +352,11 @@ impl TyperApp {
             last_compile_ms: 0.0,
             last_error: None,
             zoom: 1.0,
+            preview_maximized: false,
+            outline_width: 220.0,
+            preview_headings: Vec::new(),
+            pending_preview_jump: None,
+            scroll_editor_cursor_to_top: false,
             show_typst_source: false,
             status_message: initial_status,
             startup_visibility_ensured: false,
@@ -334,8 +373,63 @@ impl TyperApp {
             active_tab: 0,
         };
 
+        app.restore_session();
         app.trigger_preview_update();
         app
+    }
+
+    /// 前回終了時に保存したタブ一式があれば、未保存のものも含めて復元する
+    fn restore_session(&mut self) {
+        let Some((saved, active)) = load_session() else {
+            return;
+        };
+        let count = saved.len();
+        self.tabs = saved
+            .into_iter()
+            .map(|tab| {
+                Some(TabSnapshot {
+                    markdown_text: tab.content.unwrap_or_default(),
+                    current_file: tab.current_file,
+                    is_dirty: tab.is_dirty,
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
+                    cursor_char_range: None,
+                    last_export_path: None,
+                })
+            })
+            .collect();
+        self.active_tab = active;
+        let snapshot = self.tabs[active].take().expect("復元直後のスロットは必ずSome");
+        self.load_tab_snapshot(snapshot);
+        self.status_message = format!("前回のタブを復元しました（{count}件）");
+    }
+
+    /// 開いている全タブをセッションとして保存する（テスト時は実設定を汚さないよう何もしない）
+    fn save_session_now(&self) {
+        if !self.persist_settings {
+            return;
+        }
+        let tabs: Vec<SessionTab> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                let snap = match slot {
+                    Some(s) => s.clone(),
+                    None => {
+                        debug_assert_eq!(i, self.active_tab);
+                        self.snapshot_active_tab()
+                    }
+                };
+                let keep_text = snap.is_dirty || snap.current_file.is_none();
+                SessionTab {
+                    content: keep_text.then_some(snap.markdown_text),
+                    current_file: snap.current_file,
+                    is_dirty: snap.is_dirty,
+                }
+            })
+            .collect();
+        save_session(&tabs, self.active_tab);
     }
 
     fn base_dir(&self) -> Option<PathBuf> {
@@ -407,6 +501,7 @@ impl TyperApp {
                             self.last_compile_ms = output.compile_ms;
                             self.last_error = None;
                             self.page_textures.clear();
+                            self.preview_headings = output.headings;
 
                             let scale_divisor = (2.0 * self.zoom).clamp(1.2, 3.5);
                             for (idx, page) in output.pages.into_iter().enumerate() {
@@ -619,6 +714,8 @@ impl TyperApp {
             }
             let _ = std::fs::write(&path, &self.markdown_text);
         }
+        // 異常終了時にも直近のタブ構成が残るよう、自動保存のタイミングでセッションも書き出す
+        self.save_session_now();
     }
 
     fn action_save_file(&mut self, save_as: bool) -> bool {
@@ -1021,11 +1118,15 @@ impl TyperApp {
 
     /// 見出しアウトラインパネルを描画する（クリックで該当見出しへジャンプ）
     fn draw_outline_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("outline_panel")
-            .resizable(true)
-            .default_size(200.0)
-            .size_range(140.0..=420.0)
+        // egui標準のリサイズは中身の描画サイズから幅を記憶し直すため、ドラッグした幅が保持されなかった。
+        // 幅はアプリ側で持ち、パネルは固定幅で描いて、右端のつまみを自前で処理する
+        let width = self.outline_width.clamp(140.0, 600.0);
+        let panel = egui::Panel::left("outline_panel_fixed")
+            .resizable(false)
+            .exact_size(width)
             .show(ui, |ui| {
+                // 中身を常にパネル幅いっぱいに広げ、描画幅と確保幅のずれ（黒い隙間）を防ぐ
+                ui.set_min_width(ui.available_width());
                 ui.label(RichText::new("🗂 アウトライン").strong().small());
                 ui.separator();
                 let headings = extract_headings_outline(&self.markdown_text);
@@ -1034,20 +1135,57 @@ impl TyperApp {
                 } else {
                     egui::ScrollArea::vertical()
                         .id_salt("outline_scroll")
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            for (level, title, char_idx) in headings {
+                            let mut clicked: Option<(usize, String, usize)> = None;
+                            for (i, (level, title, char_idx)) in headings.iter().enumerate() {
                                 let indent = (level.saturating_sub(1)) as f32 * 12.0;
                                 ui.horizontal(|ui| {
                                     ui.add_space(indent);
-                                    if ui.small_button(&title).clicked() {
-                                        self.cursor_char_range = Some((char_idx, char_idx));
-                                        self.pending_cursor_selection = Some((char_idx, char_idx));
+                                    if ui.small_button(title).clicked() {
+                                        clicked = Some((i, title.clone(), *char_idx));
                                     }
                                 });
+                            }
+                            if let Some((i, title, char_idx)) = clicked {
+                                self.cursor_char_range = Some((char_idx, char_idx));
+                                self.pending_cursor_selection = Some((char_idx, char_idx));
+                                self.scroll_editor_cursor_to_top = true;
+                                let same_title_before =
+                                    headings[..i].iter().filter(|h| h.1 == title).count();
+                                self.pending_preview_jump = find_preview_heading(
+                                    &self.preview_headings,
+                                    i,
+                                    &title,
+                                    same_title_before,
+                                );
                             }
                         });
                 }
             });
+
+        // 右端（パネル内側）にドラッグ用のつまみ。エディタと重ならないよう内側に置く
+        let edge = panel.response.rect.right();
+        let handle_rect = egui::Rect::from_min_max(
+            egui::pos2(edge - 6.0, panel.response.rect.top()),
+            egui::pos2(edge, panel.response.rect.bottom()),
+        );
+        let handle = ui.interact(
+            handle_rect,
+            ui.scope_id().with("outline_resize_handle"),
+            Sense::drag(),
+        );
+        if handle.hovered() || handle.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            ui.painter().vline(
+                edge - 1.0,
+                handle_rect.y_range(),
+                Stroke::new(2.0, ui.visuals().selection.bg_fill),
+            );
+        }
+        if handle.dragged() {
+            self.outline_width = (self.outline_width + handle.drag_delta().x).clamp(140.0, 600.0);
+        }
     }
 
     /// ページ・基本書式設定GUIバーを描画する（フロントマターと双方向同期）
@@ -1427,7 +1565,10 @@ impl eframe::App for TyperApp {
 
         // ウィンドウの「×」ボタンによる終了要求のインターセプト（未保存保護）
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.any_unsaved_changes() && !self.allow_immediate_close {
+            if self.persist_settings {
+                // 未保存のタブも含めてセッションへ退避し、次回起動時に復元するので確認なしで閉じる
+                self.save_session_now();
+            } else if self.any_unsaved_changes() && !self.allow_immediate_close {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.pending_action = Some(PendingAction::CloseWindow);
             }
@@ -1554,6 +1695,14 @@ impl eframe::App for TyperApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O)) {
             self.show_outline_panel = !self.show_outline_panel;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
+            self.preview_maximized = !self.preview_maximized;
+        }
+        if self.preview_maximized
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.preview_maximized = false;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
             self.show_page_settings_bar = !self.show_page_settings_bar;
@@ -1723,6 +1872,13 @@ impl eframe::App for TyperApp {
                     {
                         self.show_outline_panel = !self.show_outline_panel;
                     }
+                    if ui
+                        .selectable_label(self.preview_maximized, "🔍 プレビュー最大化")
+                        .on_hover_text("プレビューをウィンドウ全体に広げます。もう一度押すかEscで元に戻ります (F11)")
+                        .clicked()
+                    {
+                        self.preview_maximized = !self.preview_maximized;
+                    }
 
                     ui.separator();
 
@@ -1814,12 +1970,24 @@ impl eframe::App for TyperApp {
         // 下部ステータスバー
         self.draw_status_bar(ui);
 
-        // 右ペイン：ページプレビュー領域
-        egui::Panel::right("preview_panel")
-            .resizable(true)
-            .default_size(580.0)
-            .size_range(320.0..=1200.0)
-            .show(ui, |ui| {
+        // 最大化中は、プレビューが全幅を取る前にアウトラインを左へ確保しておく（表示/非表示は通常時と共通）
+        if self.preview_maximized && self.show_outline_panel {
+            self.draw_outline_panel(ui);
+        }
+
+        // 右ペイン：ページプレビュー領域（最大化中はウィンドウ全幅を占有し、エディタは描かない）。
+        // 最大化時は別IDのパネルにして、通常時にユーザーが調整した幅を上書きしないようにする
+        let preview_panel = if self.preview_maximized {
+            egui::Panel::right("preview_panel_maximized")
+                .resizable(false)
+                .exact_size(ui.available_width())
+        } else {
+            egui::Panel::right("preview_panel")
+                .resizable(true)
+                .default_size(580.0)
+                .size_range(320.0..=1200.0)
+        };
+        preview_panel.show(ui, |ui| {
                 if let Some(err) = &self.last_error {
                     egui::Frame::NONE
                         .fill(Color32::from_rgb(253, 232, 230))
@@ -1886,6 +2054,18 @@ impl eframe::App for TyperApp {
 
                                         let (rect, _) =
                                             ui.allocate_exact_size(display_size, Sense::hover());
+                                        if let Some((page, y_pt)) = self.pending_preview_jump
+                                            && page == idx
+                                        {
+                                            // base_size はpt単位なので、表示倍率を掛ければ画面上の位置になる
+                                            let y = rect.top() + y_pt * self.zoom * 0.85;
+                                            let target = egui::Rect::from_min_max(
+                                                egui::pos2(rect.left(), y - 12.0),
+                                                egui::pos2(rect.right(), y),
+                                            );
+                                            ui.scroll_to_rect(target, Some(egui::Align::Min));
+                                            self.pending_preview_jump = None;
+                                        }
                                         let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
                                         ui.painter().rect_filled(
                                             shadow_rect,
@@ -1923,8 +2103,12 @@ impl eframe::App for TyperApp {
                     });
             });
 
+        if self.preview_maximized {
+            return;
+        }
+
         // 見出しアウトラインパネル（クリックで該当見出しへジャンプ）
-        if self.show_outline_panel {
+        if self.show_outline_panel && !self.preview_maximized {
             self.draw_outline_panel(ui);
         }
 
@@ -2219,6 +2403,18 @@ impl eframe::App for TyperApp {
                         output.state.cursor.set_char_range(Some(range));
                         output.state.store(ui.ctx(), output.response.id);
                         output.response.request_focus();
+
+                        // カーソルを動かしただけではエディタはスクロールしないため、明示的に表示位置を合わせる
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(CCursor::new(start_c))
+                            .translate(output.galley_pos.to_vec2());
+                        let align = if std::mem::take(&mut self.scroll_editor_cursor_to_top) {
+                            Some(egui::Align::Min)
+                        } else {
+                            None
+                        };
+                        ui.scroll_to_rect(cursor_rect, align);
                     }
 
                     // 現在のカーソル・選択位置を記録
@@ -2321,6 +2517,11 @@ mod tests {
             last_compile_ms: 0.0,
             last_error: None,
             zoom: 1.0,
+            preview_maximized: false,
+            outline_width: 220.0,
+            preview_headings: Vec::new(),
+            pending_preview_jump: None,
+            scroll_editor_cursor_to_top: false,
             show_typst_source: false,
             status_message: String::new(),
             startup_visibility_ensured: false,
@@ -2627,6 +2828,29 @@ mod tests {
         app.record_recent_file(Path::new("new.md"));
         assert_eq!(app.recent_files.len(), 8);
         assert_eq!(app.recent_files[0], PathBuf::from("new.md"));
+    }
+
+    fn heading(text: &str, page: usize, y_pt: f32) -> HeadingPosition {
+        HeadingPosition { text: text.to_string(), page, y_pt }
+    }
+
+    #[test]
+    fn test_find_preview_heading_matches_text_ignoring_markup() {
+        let hs = vec![heading("概要", 0, 50.0), heading("太字の見出し", 1, 80.0)];
+        assert_eq!(find_preview_heading(&hs, 1, "**太字**の見出し", 0), Some((1, 80.0)));
+    }
+
+    #[test]
+    fn test_find_preview_heading_picks_nth_duplicate() {
+        let hs = vec![heading("まとめ", 0, 10.0), heading("本文", 0, 40.0), heading("まとめ", 2, 30.0)];
+        assert_eq!(find_preview_heading(&hs, 2, "まとめ", 1), Some((2, 30.0)));
+    }
+
+    #[test]
+    fn test_find_preview_heading_falls_back_to_order() {
+        let hs = vec![heading("A", 0, 10.0), heading("B", 1, 20.0)];
+        assert_eq!(find_preview_heading(&hs, 1, "一致しない", 0), Some((1, 20.0)));
+        assert_eq!(find_preview_heading(&hs, 5, "一致しない", 0), None);
     }
 
     #[test]
