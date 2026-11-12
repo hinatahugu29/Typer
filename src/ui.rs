@@ -29,9 +29,9 @@ use crate::typst_gen::generate_typst_source_with_base;
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
 use crate::ui_persistence::{
-    autosave_path_for, load_dark_mode_setting, load_recent_files, load_session,
-    resolve_startup_document, save_dark_mode_setting, save_recent_files, save_session,
-    SessionTab, setup_japanese_fonts, setup_visual_theme,
+    SessionTab, autosave_path_for, load_dark_mode_setting, load_recent_files, load_session,
+    resolve_startup_document, sanitize_file_name, save_dark_mode_setting, save_recent_files,
+    save_session, setup_japanese_fonts, setup_visual_theme,
 };
 use crate::ui_text::{
     byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
@@ -718,11 +718,35 @@ impl TyperApp {
         self.save_session_now();
     }
 
+    /// 未保存の新規文書のファイル名候補を推測する（優先順位: フロントマターの `title:` → 最初のH1見出し → 既定値）
+    fn suggest_file_name(&self) -> String {
+        let settings = parse_settings(&self.markdown_text);
+        let candidate = settings.title.filter(|t| !t.trim().is_empty()).or_else(|| {
+            extract_headings_outline(&self.markdown_text)
+                .into_iter()
+                .find(|(level, _, _)| *level == 1)
+                .map(|(_, text, _)| text)
+                .filter(|t| !t.trim().is_empty())
+        });
+
+        match candidate {
+            Some(name) => format!("{}.md", sanitize_file_name(&name)),
+            None => "report.md".to_string(),
+        }
+    }
+
     fn action_save_file(&mut self, save_as: bool) -> bool {
         let target_path = if save_as || self.current_file.is_none() {
+            let default_name = self
+                .current_file
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| self.suggest_file_name());
             rfd::FileDialog::new()
                 .add_filter("Markdown文書 (*.md)", &["md"])
-                .set_file_name("report.md")
+                .set_file_name(&default_name)
                 .save_file()
         } else {
             self.current_file.clone()

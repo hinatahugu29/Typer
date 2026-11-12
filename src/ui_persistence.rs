@@ -182,6 +182,31 @@ pub(crate) fn autosave_path_for(current_file: &Option<PathBuf>) -> Option<PathBu
     }
 }
 
+/// 文書タイトルや見出しのテキストを、Windowsでも安全なファイル名に変換する。
+/// 禁止文字 (`\ / : * ? " < > |`) や制御文字を `_` に置換し、前後の空白・ドットを除去、
+/// 空になった場合や長すぎる場合は既定値・切り詰めで補う。
+pub(crate) fn sanitize_file_name(raw: &str) -> String {
+    const MAX_LEN: usize = 60;
+    let mut name: String = raw
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    name = name.trim_matches('.').trim().to_string();
+    if name.chars().count() > MAX_LEN {
+        name = name.chars().take(MAX_LEN).collect();
+    }
+    if name.is_empty() {
+        name = "report".to_string();
+    }
+    name
+}
+
 /// Windowsの日本語システムフォントを `egui` に登録し、UIおよびエディタでの日本語表示・IME入力を最適化する
 pub(crate) fn setup_japanese_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
