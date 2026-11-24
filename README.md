@@ -283,6 +283,21 @@ cargo build --release
 ```
 生成された `target\release\typer.exe` を単体で配布・実行できます。
 
+### 描画バックエンドと画面のちらつき対策
+描画には wgpu を使っています。wgpu は何も指定しないと、Vulkan / DX12 / OpenGL / ソフトウェア描画をすべて初期化してから1つを選びます。Intel 内蔵GPUの環境では、この状態だとマウスを動かしたときに画面がちらつくことがありました。
+
+そのため Windows では、描画バックエンドを **DX12 だけ**に絞って起動します（[src/main.rs](src/main.rs) の `wgpu_configuration`）。
+
+環境変数 `WGPU_BACKEND` を設定すると、こちらが優先されます。DX12 で表示がおかしいときは、別のバックエンドを試してください。
+```powershell
+# Vulkan で起動する
+$env:WGPU_BACKEND = "vulkan"; .\typer.exe
+
+# 既定（DX12 固定）に戻す
+Remove-Item Env:WGPU_BACKEND; .\typer.exe
+```
+指定できる値は `dx12` / `vulkan` / `gl` などです。`$env:` での設定はその PowerShell の画面の中だけで有効です。常に使いたいときは、Windows のユーザー環境変数に登録してください。
+
 ---
 
 ## ドキュメント
