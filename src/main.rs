@@ -14,7 +14,25 @@ mod ui_persistence;
 mod ui_text;
 
 use eframe::egui;
+use eframe::egui_wgpu::{self, wgpu};
 use ui::TyperApp;
+
+/// 描画に使うwgpuバックエンドを1つに絞る。
+///
+/// 既定では Vulkan/DX12/OpenGL/ソフトウェア描画をすべて初期化したうえで1つを選ぶが、
+/// Intel内蔵GPU環境ではこの状態だとマウス移動時に画面がちらつくことがあった
+/// （`WGPU_BACKEND` で1つに限定すると再現しない）。
+/// そのためWindowsでは DX12 のみを使う。`WGPU_BACKEND` が設定されていればそちらを優先する。
+fn wgpu_configuration() -> egui_wgpu::WgpuConfiguration {
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    if cfg!(windows) && wgpu::Backends::from_env().is_none() {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    }
+    egui_wgpu::WgpuConfiguration {
+        wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
+}
 
 fn main() -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
@@ -27,6 +45,7 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([800.0, 520.0])
             .with_visible(true)
             .with_icon(icon),
+        wgpu_options: wgpu_configuration(),
         ..Default::default()
     };
 
