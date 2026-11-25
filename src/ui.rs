@@ -1598,13 +1598,16 @@ impl TyperApp {
 
     /// ページ・基本書式設定GUIバーを描画する（フロントマターと双方向同期）
     fn draw_page_settings_bar(&mut self, ui: &mut egui::Ui) {
+        // 窓幅が足りないときは右端の項目が見切れないよう折り返し、バーの高さを内容に合わせる
         egui::Panel::top("page_settings_bar")
-            .exact_size(34.0)
+            .resizable(false)
+            .min_size(34.0)
             .show(ui, |ui| {
                 let mut doc_settings = parse_settings(&self.markdown_text);
                 let mut changed = false;
 
-                ui.horizontal_centered(|ui| {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(RichText::new("⚙ 文書設定:").small().strong());
 
@@ -1817,6 +1820,7 @@ impl TyperApp {
                         }
                     }
                 });
+                ui.add_space(2.0);
 
                 if changed {
                     self.push_undo_snapshot();
