@@ -10,7 +10,8 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 
 use crate::model::{
-    Alignment, Block, Document, DocumentSettings, FontChoice, Inline, InlineStyle, Orientation,
+    Alignment, Block, CellSlot, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
+    Orientation, resolve_table_layout,
 };
 use crate::typst_gen::resolve_local_image_path;
 
@@ -555,12 +556,26 @@ fn render_docx_block(
             alignments,
             rows,
             attrs,
+            merges,
         } => {
             let col_count = headers
                 .len()
                 .max(rows.first().map(|r| r.len()).unwrap_or(1))
                 .max(1);
-            out.push_str("    <w:tbl><w:tblPr>");
+            let s = &images.settings;
+            let page_w = match s.orientation {
+                Orientation::Portrait => 11906,
+                Orientation::Landscape => 16838,
+            };
+            let available =
+                (page_w - 2 * length_to_twips(&s.margin, 1134) - images.indent_twips).max(1440);
+            let col_widths = column_widths_twips(attrs.widths.as_deref(), col_count, available);
+            let total_width: i64 = col_widths.iter().sum();
+
+            // `w:tblPr` の子要素の順序：tblW → tblInd → tblBorders → tblLayout
+            out.push_str(&format!(
+                "    <w:tbl><w:tblPr><w:tblW w:w=\"{total_width}\" w:type=\"dxa\"/>"
+            ));
             if images.indent_twips > 0 {
                 out.push_str(&format!(
                     "<w:tblInd w:w=\"{}\" w:type=\"dxa\"/>",
@@ -573,9 +588,14 @@ fn render_docx_block(
                     "<w:{edge} w:val=\"single\" w:sz=\"4\" w:color=\"9AA0A6\"/>"
                 ));
             }
-            out.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
-            for _ in 0..col_count {
-                out.push_str("<w:gridCol/>");
+            out.push_str("</w:tblBorders>");
+            // 列幅を指定した表は、Wordが中身に合わせて幅を変えないよう固定する
+            if attrs.widths.is_some() {
+                out.push_str("<w:tblLayout w:type=\"fixed\"/>");
+            }
+            out.push_str("</w:tblPr><w:tblGrid>");
+            for w in &col_widths {
+                out.push_str(&format!("<w:gridCol w:w=\"{w}\"/>"));
             }
             out.push_str("</w:tblGrid>\n");
 
@@ -583,35 +603,39 @@ fn render_docx_block(
                 .row_padding
                 .as_deref()
                 .map(|v| length_to_twips(v, 120));
+            let (header_layout, row_layout) =
+                resolve_table_layout(merges, !headers.is_empty(), rows.len(), col_count);
+            let mut all_rows: Vec<(&[Vec<Inline>], bool)> = Vec::new();
             if !headers.is_empty() {
-                out.push_str("      <w:tr>\n");
-                for i in 0..col_count {
-                    let cell = headers.get(i);
-                    let bg = attrs.header_bg.as_deref();
-                    render_docx_table_cell(
-                        out,
-                        cell,
-                        alignments.get(i).copied().flatten(),
-                        true,
-                        bg,
-                        row_padding_twips,
-                        base_dir,
-                        images,
-                    );
-                }
-                out.push_str("      </w:tr>\n");
+                all_rows.push((headers.as_slice(), true));
             }
-            for row in rows {
+            all_rows.extend(rows.iter().map(|r| (r.as_slice(), false)));
+            let all_layouts: Vec<&Vec<CellSlot>> = std::iter::once(&header_layout)
+                .filter(|_| !headers.is_empty())
+                .chain(row_layout.iter())
+                .collect();
+            let cells = docx_table_cells(&all_layouts);
+
+            for (r, (row, is_header)) in all_rows.iter().enumerate() {
                 out.push_str("      <w:tr>\n");
-                for i in 0..col_count {
-                    let cell = row.get(i);
+                for cell in &cells[r] {
+                    let content = match cell.kind {
+                        DocxCellKind::Content { orphan: false }
+                        | DocxCellKind::ContentRestart { orphan: false } => row.get(cell.col),
+                        _ => None,
+                    };
                     render_docx_table_cell(
                         out,
-                        cell,
-                        alignments.get(i).copied().flatten(),
-                        false,
-                        None,
+                        content,
+                        alignments.get(cell.col).copied().flatten(),
+                        *is_header,
+                        if *is_header {
+                            attrs.header_bg.as_deref()
+                        } else {
+                            None
+                        },
                         row_padding_twips,
+                        cell,
                         base_dir,
                         images,
                     );
@@ -749,6 +773,146 @@ fn indent_ind_attr(attrs: &crate::model::BlockAttributes, extra_left: i64) -> St
 
 const DEFAULT_CELL_PADDING_TWIPS: i64 = 80;
 
+/// `{widths: ...}` を、Wordの列幅（twip）に換算する。PDF（Typst）と同じく `%` と `fr` は
+/// 残りの幅を比で分け合い、`mm` などの長さはその幅で固定する。`auto` と指定のない列は
+/// 比の平均（比の指定がなければ1）の重みで分け合う。指定がなければ全列を等分する
+fn column_widths_twips(widths: Option<&[String]>, col_count: usize, available: i64) -> Vec<i64> {
+    enum Spec {
+        Fixed(i64),
+        Weight(f64),
+        Auto,
+    }
+    let specs: Vec<Spec> = (0..col_count)
+        .map(|i| {
+            let raw = widths
+                .and_then(|w| w.get(i))
+                .map(|s| s.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            for unit in ["fr", "%"] {
+                if let Some(v) = raw
+                    .strip_suffix(unit)
+                    .and_then(|n| n.trim().parse::<f64>().ok())
+                {
+                    if v > 0.0 {
+                        return Spec::Weight(v);
+                    }
+                }
+            }
+            match length_to_twips(&raw, -1) {
+                t if t > 0 => Spec::Fixed(t),
+                _ => Spec::Auto,
+            }
+        })
+        .collect();
+    let weights: Vec<f64> = specs
+        .iter()
+        .filter_map(|s| match s {
+            Spec::Weight(w) => Some(*w),
+            _ => None,
+        })
+        .collect();
+    let auto_weight = if weights.is_empty() {
+        1.0
+    } else {
+        weights.iter().sum::<f64>() / weights.len() as f64
+    };
+    let fixed: i64 = specs
+        .iter()
+        .map(|s| if let Spec::Fixed(t) = s { *t } else { 0 })
+        .sum();
+    let total_weight: f64 = specs
+        .iter()
+        .map(|s| match s {
+            Spec::Weight(w) => *w,
+            Spec::Auto => auto_weight,
+            Spec::Fixed(_) => 0.0,
+        })
+        .sum();
+    let remaining = (available - fixed).max(0) as f64;
+    specs
+        .iter()
+        .map(|s| match s {
+            Spec::Fixed(t) => *t,
+            Spec::Weight(w) => (remaining * w / total_weight).round() as i64,
+            Spec::Auto => (remaining * auto_weight / total_weight).round() as i64,
+        })
+        .map(|t| t.max(200))
+        .collect()
+}
+
+/// Wordの表の行に置くセル1つ分
+#[derive(Debug, Clone, PartialEq)]
+struct DocxCell {
+    /// このセルが始まる列
+    col: usize,
+    /// 横に何列ぶん占めるか（`w:gridSpan`）
+    colspan: usize,
+    kind: DocxCellKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DocxCellKind {
+    /// 中身を書くセル（`orphan` は結合先のない `<` / `^` で、中身を空にする）
+    Content { orphan: bool },
+    /// 中身を書き、下の行と縦に結合し始めるセル（`w:vMerge w:val="restart"`）
+    ContentRestart { orphan: bool },
+    /// 上のセルと縦に結合した続きのセル（Wordではこの位置にも空のセルが要る）
+    Continue,
+}
+
+/// 結合を解決した表の格子から、行ごとにWordへ書くセルの並びを作る。
+/// 横に結合した分は1つのセルにまとめ（`gridSpan`）、縦に結合した下の行には
+/// 続きのセル（`vMerge`）を置く
+fn docx_table_cells(layouts: &[&Vec<CellSlot>]) -> Vec<Vec<DocxCell>> {
+    let mut cells: Vec<Vec<DocxCell>> = vec![Vec::new(); layouts.len()];
+    // 縦の結合の続き：行 → (列, 横幅)
+    let mut continuations: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layouts.len()];
+    for (r, row) in layouts.iter().enumerate() {
+        for (c, slot) in row.iter().enumerate() {
+            if let CellSlot::Origin {
+                colspan, rowspan, ..
+            } = *slot
+            {
+                for below in continuations.iter_mut().skip(r + 1).take(rowspan - 1) {
+                    below.push((c, colspan));
+                }
+            }
+        }
+    }
+    for (r, row) in layouts.iter().enumerate() {
+        for (c, slot) in row.iter().enumerate() {
+            match *slot {
+                CellSlot::Origin {
+                    colspan,
+                    rowspan,
+                    orphan,
+                } => cells[r].push(DocxCell {
+                    col: c,
+                    colspan,
+                    kind: if rowspan > 1 {
+                        DocxCellKind::ContentRestart { orphan }
+                    } else {
+                        DocxCellKind::Content { orphan }
+                    },
+                }),
+                CellSlot::Covered => {
+                    if let Some(&(_, colspan)) =
+                        continuations[r].iter().find(|(start, _)| *start == c)
+                    {
+                        cells[r].push(DocxCell {
+                            col: c,
+                            colspan,
+                            kind: DocxCellKind::Continue,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    cells
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_docx_table_cell(
     out: &mut String,
     cell: Option<&Vec<Inline>>,
@@ -756,6 +920,7 @@ fn render_docx_table_cell(
     is_header: bool,
     header_bg: Option<&str>,
     row_padding_twips: Option<i64>,
+    layout: &DocxCell,
     base_dir: Option<&Path>,
     images: &mut DocxImageCollector,
 ) {
@@ -780,8 +945,16 @@ fn render_docx_table_cell(
     let cell_fill = whole_cell.as_ref().map(|(bg, _)| bg.as_str()).or(header_bg);
     let cell = whole_cell.as_ref().map(|(_, inner)| inner).or(cell);
 
-    // `w:tcPr` の子要素も順序が決まっている（shd → tcMar）
+    // `w:tcPr` の子要素も順序が決まっている（gridSpan → vMerge → shd → tcMar）
     out.push_str("        <w:tc><w:tcPr>");
+    if layout.colspan > 1 {
+        out.push_str(&format!("<w:gridSpan w:val=\"{}\"/>", layout.colspan));
+    }
+    match layout.kind {
+        DocxCellKind::ContentRestart { .. } => out.push_str("<w:vMerge w:val=\"restart\"/>"),
+        DocxCellKind::Continue => out.push_str("<w:vMerge/>"),
+        DocxCellKind::Content { .. } => {}
+    }
     if let Some(bg) = cell_fill {
         let safe = sanitize_hex(bg);
         out.push_str(&format!(
@@ -1776,7 +1949,7 @@ mod structure_tests {
     fn table_inside_quote_gets_table_indent() {
         let out = document("> | A |\n> |---|\n> | 1 |\n");
         assert!(
-            out.contains("<w:tblPr><w:tblInd w:w=\"720\" w:type=\"dxa\"/><w:tblBorders>"),
+            out.contains("<w:tblInd w:w=\"720\" w:type=\"dxa\"/><w:tblBorders>"),
             "{out}"
         );
     }

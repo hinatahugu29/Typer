@@ -5,6 +5,7 @@
 //! 書いた本人は「効いていない」ことに気づきにくいため、ここで原稿を1行ずつ調べ、
 //! 原稿の行番号付きの警告として返す。組版そのものには一切影響しない。
 
+use crate::model::{Block, CellMerge, CellSlot, resolve_table_layout};
 use crate::parser::{
     clean_frontmatter_value, is_columns_end_directive, is_standalone_block_attr_line,
     normalize_color, parse_columns_start_directive, parse_settings, parse_space_directive,
@@ -86,7 +87,68 @@ pub fn lint_markdown(text: &str) -> Vec<SyntaxWarning> {
         }
     }
 
+    check_table_merges(&crate::parser::parse_document(text).blocks, &mut warnings);
+    warnings.sort_by_key(|w| w.line);
     warnings
+}
+
+/// 表のセル結合の `<` / `^` のうち、結合先がなく空のセルになるものを調べる
+fn check_table_merges(blocks: &[Block], warnings: &mut Vec<SyntaxWarning>) {
+    for block in blocks {
+        match block {
+            Block::Table {
+                headers,
+                rows,
+                attrs,
+                merges,
+                ..
+            } => {
+                let Some(table_line) = attrs.source_line else {
+                    continue;
+                };
+                let col_count = headers
+                    .len()
+                    .max(rows.first().map(|r| r.len()).unwrap_or(1))
+                    .max(1);
+                let (header, body) =
+                    resolve_table_layout(merges, !headers.is_empty(), rows.len(), col_count);
+                let header_row = std::iter::once((table_line, &header, &merges.header));
+                // 本文の行は、見出し行と区切り行（`| --- |`）の次から1行ずつ並ぶ
+                let body_rows = body
+                    .iter()
+                    .zip(&merges.rows)
+                    .enumerate()
+                    .map(|(i, (slots, m))| (table_line + 2 + i, slots, m));
+                for (line, slots, row_merges) in header_row.chain(body_rows) {
+                    for (c, slot) in slots.iter().enumerate() {
+                        if !matches!(slot, CellSlot::Origin { orphan: true, .. }) {
+                            continue;
+                        }
+                        let message = match row_merges.get(c) {
+                            Some(CellMerge::Left) => format!(
+                                "表の{}列目の「<」は結合できないため、空のセルになります（左端の列では使えません。左のセルが上と結合している場合も、結合した範囲が長方形にならないため使えません）",
+                                c + 1
+                            ),
+                            _ => format!(
+                                "表の{}列目の「^」は結合できないため、空のセルになります（見出し行の直後の行では使えません。上のセルが横に結合している場合は、この行の同じ範囲もすべて「^」か「<」にしてください）",
+                                c + 1
+                            ),
+                        };
+                        warnings.push(SyntaxWarning { line, message });
+                    }
+                }
+            }
+            Block::BlockQuote { blocks, .. } | Block::Columns { blocks, .. } => {
+                check_table_merges(blocks, warnings)
+            }
+            Block::List { items, .. } => {
+                for item in items {
+                    check_table_merges(&item.children, warnings);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// フロントマター（先頭の `---` 〜 `---`）の値を調べ、本文が始まる行の添字（0始まり）を返す

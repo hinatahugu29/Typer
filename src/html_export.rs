@@ -4,7 +4,8 @@
 //! ローカル画像が存在する場合はBase64データURIとしてHTML内に直接埋め込み、単一ファイルで完結させる。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
+    Alignment, Block, BlockAttributes, CellSlot, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, resolve_table_layout,
 };
 use crate::typst_gen::resolve_local_image_path;
 use std::cell::RefCell;
@@ -420,11 +421,14 @@ fn render_html_block(
             alignments,
             rows,
             attrs,
+            merges,
         } => {
             let col_count = headers
                 .len()
                 .max(rows.first().map(|r| r.len()).unwrap_or(1))
                 .max(1);
+            let (header_layout, row_layout) =
+                resolve_table_layout(merges, !headers.is_empty(), rows.len(), col_count);
             out.push_str("<table>\n");
             if let Some(widths) = &attrs.widths {
                 out.push_str("  <colgroup>\n");
@@ -455,22 +459,53 @@ fn render_html_block(
                     .map(|c| format!(" style=\"background-color: {}\"", sanitize_color_hex(c)))
                     .unwrap_or_default();
                 let _ = write!(out, "  <thead>\n    <tr{header_bg_style}>\n");
-                for (i, cell) in headers.iter().enumerate() {
+                for (i, slot) in header_layout.iter().enumerate() {
+                    let CellSlot::Origin {
+                        colspan,
+                        rowspan,
+                        orphan,
+                    } = *slot
+                    else {
+                        continue;
+                    };
                     let align = alignments.get(i).copied().flatten();
                     let style_attr =
                         combine_cell_style_attr(cell_align_css(align), row_padding_css.as_deref());
-                    let _ = write!(out, "      <th{style_attr}>");
-                    render_html_inlines(out, cell, ctx);
+                    let span_attr = span_attrs(colspan, rowspan);
+                    let _ = write!(out, "      <th{span_attr}{style_attr}>");
+                    if let Some(cell) = headers.get(i).filter(|_| !orphan) {
+                        render_html_inlines(out, cell, ctx);
+                    }
                     out.push_str("</th>\n");
                 }
                 out.push_str("    </tr>\n  </thead>\n");
             }
             out.push_str("  <tbody>\n");
-            for row in rows {
+            for (r, slots) in row_layout.iter().enumerate() {
                 out.push_str("    <tr>\n");
-                for (i, cell) in row.iter().enumerate() {
+                for (i, slot) in slots.iter().enumerate() {
+                    let CellSlot::Origin {
+                        colspan,
+                        rowspan,
+                        orphan,
+                    } = *slot
+                    else {
+                        continue;
+                    };
                     let align = alignments.get(i).copied().flatten();
-                    render_html_table_cell(out, cell, align, ctx, row_padding_css.as_deref());
+                    let cell = rows[r]
+                        .get(i)
+                        .filter(|_| !orphan)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    render_html_table_cell(
+                        out,
+                        cell,
+                        align,
+                        ctx,
+                        row_padding_css.as_deref(),
+                        &span_attrs(colspan, rowspan),
+                    );
                 }
                 out.push_str("    </tr>\n");
             }
@@ -652,12 +687,25 @@ fn combine_cell_style_attr(a: Option<&str>, b: Option<&str>) -> String {
 
 /// セル内容が丸ごと `{bg: ...}` で装飾されている場合は、`<td>` 自体の背景色として扱い
 /// セル単位の完全な塗りつぶしを行う。それ以外は従来通り内容をそのまま描画する。
+/// 結合したセルの `colspan` / `rowspan` 属性（先頭に空白付き。結合しないなら空文字列）
+fn span_attrs(colspan: usize, rowspan: usize) -> String {
+    let mut s = String::new();
+    if colspan > 1 {
+        let _ = write!(s, " colspan=\"{colspan}\"");
+    }
+    if rowspan > 1 {
+        let _ = write!(s, " rowspan=\"{rowspan}\"");
+    }
+    s
+}
+
 fn render_html_table_cell(
     out: &mut String,
     cell: &[Inline],
     align: Option<Alignment>,
     ctx: Ctx<'_>,
     row_padding_css: Option<&str>,
+    span_attr: &str,
 ) {
     if let [Inline::Styled { content, style }] = cell {
         if let Some(bg) = &style.bg {
@@ -681,14 +729,14 @@ fn render_html_table_cell(
             .flatten()
             .collect::<Vec<_>>()
             .join("; ");
-            let _ = write!(out, "      <td style=\"{css}\">");
+            let _ = write!(out, "      <td{span_attr} style=\"{css}\">");
             render_html_inlines(out, &cell_content, ctx);
             out.push_str("</td>\n");
             return;
         }
     }
     let style_attr = combine_cell_style_attr(cell_align_css(align), row_padding_css);
-    let _ = write!(out, "      <td{style_attr}>");
+    let _ = write!(out, "      <td{span_attr}{style_attr}>");
     render_html_inlines(out, cell, ctx);
     out.push_str("</td>\n");
 }

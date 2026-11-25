@@ -9,8 +9,8 @@
 //! 4. インライン装飾 (`[重要]{red}`, `[テキスト]{color: red, size: 12pt}`, `{color:red|重要}`)
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
-    ListItem, Orientation,
+    Alignment, Block, BlockAttributes, CellMerge, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, ListItem, Orientation, TableMerges,
 };
 use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::fmt::Write;
@@ -165,21 +165,35 @@ pub fn parse_document(input: &str) -> Document {
                             current_row: Vec::new(),
                             in_header: false,
                             attrs,
+                            current_merges: Vec::new(),
+                            merges: TableMerges::default(),
                         });
                     }
                     Tag::TableHead => {
                         if let Some(t) = &mut in_table {
                             t.in_header = true;
                             t.current_row.clear();
+                            t.current_merges.clear();
                         }
                     }
                     Tag::TableRow => {
                         if let Some(t) = &mut in_table {
                             t.current_row.clear();
+                            t.current_merges.clear();
                         }
                     }
                     Tag::TableCell => {
                         current_inlines.clear();
+                        // 結合の指定は原稿の文字そのもので判定する（解析後の文字では
+                        // `\<`（記号としての `<`）と区別できないため）
+                        if let Some(t) = &mut in_table {
+                            let merge = match preprocessed[range.clone()].trim() {
+                                "<" => CellMerge::Left,
+                                "^" => CellMerge::Up,
+                                _ => CellMerge::None,
+                            };
+                            t.current_merges.push(merge);
+                        }
                     }
                     Tag::Strong => {
                         let prev = std::mem::take(&mut current_inlines);
@@ -322,14 +336,17 @@ pub fn parse_document(input: &str) -> Document {
                 TagEnd::TableHead => {
                     if let Some(t) = &mut in_table {
                         t.headers = std::mem::take(&mut t.current_row);
+                        t.merges.header = std::mem::take(&mut t.current_merges);
                         t.in_header = false;
                     }
                 }
                 TagEnd::TableRow => {
                     if let Some(t) = &mut in_table {
                         let row = std::mem::take(&mut t.current_row);
+                        let merges = std::mem::take(&mut t.current_merges);
                         if !row.is_empty() {
                             t.rows.push(row);
+                            t.merges.rows.push(merges);
                         }
                     }
                 }
@@ -340,6 +357,7 @@ pub fn parse_document(input: &str) -> Document {
                             alignments: t.alignments,
                             rows: t.rows,
                             attrs: t.attrs,
+                            merges: t.merges,
                         };
                         emit_block(&mut stack, &mut blocks, block);
                     }
@@ -871,6 +889,9 @@ struct TableState {
     current_row: Vec<Vec<Inline>>,
     in_header: bool,
     attrs: BlockAttributes,
+    /// いま読んでいる行の、セルごとの結合の指定
+    current_merges: Vec<CellMerge>,
+    merges: TableMerges,
 }
 
 fn heading_level_to_u8(level: HeadingLevel) -> u8 {

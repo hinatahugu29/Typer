@@ -4,8 +4,8 @@
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
-    ListItem, Orientation,
+    Alignment, Block, BlockAttributes, CellSlot, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, ListItem, Orientation, TableMerges, resolve_table_layout,
 };
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -299,8 +299,9 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             alignments,
             rows,
             attrs,
+            merges,
         } => {
-            render_table(out, headers, alignments, rows, attrs, base_dir);
+            render_table(out, headers, alignments, rows, attrs, merges, base_dir);
             out.push_str("\n\n");
         }
         Block::BlockQuote {
@@ -394,6 +395,7 @@ fn render_table(
     alignments: &[Option<Alignment>],
     rows: &[Vec<Vec<Inline>>],
     attrs: &BlockAttributes,
+    merges: &TableMerges,
     base_dir: Option<&Path>,
 ) {
     let col_count = headers
@@ -448,28 +450,53 @@ fn render_table(
         let _ = writeln!(table_code, "  inset: (x: 7pt, y: {safe_padding}),");
     }
 
+    let (header_layout, row_layout) =
+        resolve_table_layout(merges, !headers.is_empty(), rows.len(), col_count);
+
     if !headers.is_empty() {
         table_code.push_str("  table.header(");
-        for cell in headers.iter().take(col_count) {
-            render_table_cell(&mut table_code, cell, base_dir, Some("*"), Some("*"));
-            table_code.push_str(", ");
-        }
-        for _ in headers.len()..col_count {
-            table_code.push_str("[], ");
+        for (i, slot) in header_layout.iter().enumerate() {
+            if let CellSlot::Origin {
+                colspan,
+                rowspan,
+                orphan,
+            } = *slot
+            {
+                let cell = headers.get(i).filter(|_| !orphan);
+                render_table_cell(
+                    &mut table_code,
+                    cell.map(Vec::as_slice).unwrap_or(&[]),
+                    base_dir,
+                    (colspan, rowspan),
+                    cell.is_some().then_some(("*", "*")),
+                );
+                table_code.push_str(", ");
+            }
         }
         table_code.push_str("),\n");
     }
 
-    for (i, row) in rows.iter().enumerate() {
+    for (i, slots) in row_layout.iter().enumerate() {
         table_code.push_str("  ");
         // 表の各行は原稿でも1行ずつ（見出し行・区切り行の次から）書かれている
         push_line_marker(&mut table_code, attrs.source_line.map(|l| l + 2 + i));
-        for cell in row.iter().take(col_count) {
-            render_table_cell(&mut table_code, cell, base_dir, None, None);
-            table_code.push_str(", ");
-        }
-        for _ in row.len()..col_count {
-            table_code.push_str("[], ");
+        for (c, slot) in slots.iter().enumerate() {
+            if let CellSlot::Origin {
+                colspan,
+                rowspan,
+                orphan,
+            } = *slot
+            {
+                let cell = rows[i].get(c).filter(|_| !orphan);
+                render_table_cell(
+                    &mut table_code,
+                    cell.map(Vec::as_slice).unwrap_or(&[]),
+                    base_dir,
+                    (colspan, rowspan),
+                    None,
+                );
+                table_code.push_str(", ");
+            }
         }
         table_code.push('\n');
     }
@@ -479,40 +506,53 @@ fn render_table(
 }
 
 /// セル内容が丸ごと `{bg: ...}` で装飾されている場合、そのセル全体の背景色として扱い、
-/// `table.cell(fill: ...)` でセル単位の完全な塗りつぶしを行う。
+/// `table.cell(fill: ...)` でセル単位の完全な塗りつぶしを行う。結合したセルは
+/// `table.cell(colspan: ..., rowspan: ...)` にする。
 /// それ以外の通常セルは従来通り `[内容]` のコンテンツブロックとして描画する。
 fn render_table_cell(
     out: &mut String,
     cell: &[Inline],
     base_dir: Option<&Path>,
-    content_prefix: Option<&str>,
-    content_suffix: Option<&str>,
+    (colspan, rowspan): (usize, usize),
+    wrap: Option<(&str, &str)>,
 ) {
-    if let [Inline::Styled { content, style }] = cell {
+    let mut params: Vec<String> = Vec::new();
+    if colspan > 1 {
+        params.push(format!("colspan: {colspan}"));
+    }
+    if rowspan > 1 {
+        params.push(format!("rowspan: {rowspan}"));
+    }
+    let mut content: Vec<Inline> = cell.to_vec();
+    if let [
+        Inline::Styled {
+            content: inner,
+            style,
+        },
+    ] = cell
+    {
         if let Some(bg) = &style.bg {
             let mut remaining_style = style.clone();
             remaining_style.bg = None;
-            let cell_content = if remaining_style == InlineStyle::default() {
-                content.clone()
+            content = if remaining_style == InlineStyle::default() {
+                inner.clone()
             } else {
                 vec![Inline::Styled {
-                    content: content.clone(),
+                    content: inner.clone(),
                     style: remaining_style,
                 }]
             };
-            let safe_bg = sanitize_color_hex(bg);
-            let _ = write!(out, "table.cell(fill: rgb(\"{safe_bg}\"))[");
-            out.push_str(content_prefix.unwrap_or(""));
-            render_inlines(out, &cell_content, base_dir);
-            out.push_str(content_suffix.unwrap_or(""));
-            out.push(']');
-            return;
+            params.push(format!("fill: rgb(\"{}\")", sanitize_color_hex(bg)));
         }
     }
+    if !params.is_empty() {
+        let _ = write!(out, "table.cell({})", params.join(", "));
+    }
     out.push('[');
-    out.push_str(content_prefix.unwrap_or(""));
-    render_inlines(out, cell, base_dir);
-    out.push_str(content_suffix.unwrap_or(""));
+    let (prefix, suffix) = wrap.unwrap_or(("", ""));
+    out.push_str(prefix);
+    render_inlines(out, &content, base_dir);
+    out.push_str(suffix);
     out.push(']');
 }
 

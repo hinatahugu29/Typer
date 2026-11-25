@@ -175,6 +175,8 @@ pub enum Block {
         alignments: Vec<Option<Alignment>>,
         rows: Vec<Vec<Vec<Inline>>>,
         attrs: BlockAttributes,
+        /// セル結合の指定（見出し行・各行のセルごと。`<` / `^` だけを書いたセル）
+        merges: TableMerges,
     },
     BlockQuote {
         blocks: Vec<Block>,
@@ -263,4 +265,187 @@ pub enum Inline {
     FootnoteRef(String),
     SoftBreak,
     HardBreak,
+}
+
+/// 表のセルに書かれた結合の指定
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellMerge {
+    /// 結合しない（ふつうのセル）
+    #[default]
+    None,
+    /// `<` だけを書いたセル：左のセルと結合する
+    Left,
+    /// `^` だけを書いたセル：上のセルと結合する
+    Up,
+}
+
+/// 表全体のセル結合の指定。添字は `headers` / `rows` と同じ（足りない分は結合なし）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TableMerges {
+    pub header: Vec<CellMerge>,
+    pub rows: Vec<Vec<CellMerge>>,
+}
+
+/// 結合を解決した後の、表の1マスの描き方
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellSlot {
+    /// セルを描く位置。`colspan` × `rowspan` マスを占める。
+    /// `orphan` は結合の指定（`<` / `^`）なのに結合先がなかったセルで、中身は空にする
+    Origin {
+        colspan: usize,
+        rowspan: usize,
+        orphan: bool,
+    },
+    /// 左や上のセルに結合されて、描かないマス
+    Covered,
+}
+
+/// 表のセル結合を解決し、見出し行と各行の1マスごとの描き方を返す（どちらも `col_count` 列）。
+///
+/// - `<` は左隣と結合する。左端の列に書いた `<` は結合先がない
+/// - `^` は上のセルと結合する。見出し行と本文の行をまたいでは結合しない
+/// - 結合した範囲は必ず長方形になる。2行目以降に広げられるのは、その行の該当する全マスが
+///   `^`（左端の列）または `^` / `<`（それ以外の列）のときだけ
+pub fn resolve_table_layout(
+    merges: &TableMerges,
+    has_header: bool,
+    row_count: usize,
+    col_count: usize,
+) -> (Vec<CellSlot>, Vec<Vec<CellSlot>>) {
+    // 見出し行を0行目として、本文の行と同じ格子で解決する
+    let header_rows = usize::from(has_header);
+    let total = header_rows + row_count;
+    let merge_at = |r: usize, c: usize| -> CellMerge {
+        let row = if r < header_rows {
+            Some(&merges.header)
+        } else {
+            merges.rows.get(r - header_rows)
+        };
+        row.and_then(|m| m.get(c)).copied().unwrap_or_default()
+    };
+    let same_section = |a: usize, b: usize| (a < header_rows) == (b < header_rows);
+
+    let mut grid: Vec<Vec<Option<CellSlot>>> = vec![vec![None; col_count]; total];
+    for r in 0..total {
+        for c in 0..col_count {
+            if grid[r][c].is_some() {
+                continue;
+            }
+            let mut colspan = 1;
+            while c + colspan < col_count
+                && merge_at(r, c + colspan) == CellMerge::Left
+                && grid[r][c + colspan].is_none()
+            {
+                colspan += 1;
+            }
+            let mut rowspan = 1;
+            while r + rowspan < total && same_section(r, r + rowspan) {
+                let next = r + rowspan;
+                let first_up = merge_at(next, c) == CellMerge::Up;
+                let rest_merged = (c + 1..c + colspan)
+                    .all(|cc| matches!(merge_at(next, cc), CellMerge::Up | CellMerge::Left));
+                let free = (c..c + colspan).all(|cc| grid[next][cc].is_none());
+                if !(first_up && rest_merged && free) {
+                    break;
+                }
+                rowspan += 1;
+            }
+            for row in grid.iter_mut().skip(r).take(rowspan) {
+                for slot in row.iter_mut().skip(c).take(colspan) {
+                    *slot = Some(CellSlot::Covered);
+                }
+            }
+            grid[r][c] = Some(CellSlot::Origin {
+                colspan,
+                rowspan,
+                orphan: merge_at(r, c) != CellMerge::None,
+            });
+        }
+    }
+    let mut rows: Vec<Vec<CellSlot>> = grid
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|s| s.unwrap_or(CellSlot::Covered))
+                .collect()
+        })
+        .collect();
+    let header = if has_header {
+        rows.remove(0)
+    } else {
+        Vec::new()
+    };
+    (header, rows)
+}
+
+#[cfg(test)]
+mod table_layout_tests {
+    use super::*;
+    use CellMerge::{Left as L, None as N, Up as U};
+
+    fn origin(colspan: usize, rowspan: usize) -> CellSlot {
+        CellSlot::Origin {
+            colspan,
+            rowspan,
+            orphan: false,
+        }
+    }
+    const C: CellSlot = CellSlot::Covered;
+
+    #[test]
+    fn colspan_rowspan_and_block_merges() {
+        let merges = TableMerges {
+            header: vec![N, L, N],
+            rows: vec![vec![N, L, N], vec![U, L, N], vec![U, U, N]],
+        };
+        let (header, rows) = resolve_table_layout(&merges, true, 3, 3);
+        assert_eq!(header, vec![origin(2, 1), C, origin(1, 1)]);
+        // 1行目の先頭セルが 2列×3行 を占め、3列目はそれぞれ独立
+        assert_eq!(rows[0], vec![origin(2, 3), C, origin(1, 1)]);
+        assert_eq!(rows[1], vec![C, C, origin(1, 1)]);
+        assert_eq!(rows[2], vec![C, C, origin(1, 1)]);
+    }
+
+    #[test]
+    fn two_by_two_block() {
+        let merges = TableMerges {
+            header: vec![],
+            rows: vec![vec![N, L], vec![U, U]],
+        };
+        let (_, rows) = resolve_table_layout(&merges, true, 2, 2);
+        assert_eq!(rows[0], vec![origin(2, 2), C]);
+        assert_eq!(rows[1], vec![C, C]);
+    }
+
+    #[test]
+    fn markers_without_a_target_are_orphans() {
+        let orphan = CellSlot::Origin {
+            colspan: 1,
+            rowspan: 1,
+            orphan: true,
+        };
+        // 左端の `<`、本文1行目の `^`（見出しとはまたがない）
+        let merges = TableMerges {
+            header: vec![N, N],
+            rows: vec![vec![U, N], vec![L, N]],
+        };
+        let (_, rows) = resolve_table_layout(&merges, true, 2, 2);
+        assert_eq!(rows[0][0], orphan);
+        assert_eq!(rows[1][0], orphan);
+        // 長方形にならない結合：上の行が2列結合でも、下の行が `^` と普通のセルなら広げない
+        let merges = TableMerges {
+            header: vec![],
+            rows: vec![vec![N, L], vec![U, N]],
+        };
+        let (_, rows) = resolve_table_layout(&merges, false, 2, 2);
+        assert_eq!(rows[0], vec![origin(2, 1), C]);
+        assert_eq!(rows[1], vec![orphan, origin(1, 1)]);
+    }
+
+    #[test]
+    fn short_rows_and_missing_merges_are_plain_cells() {
+        let (header, rows) = resolve_table_layout(&TableMerges::default(), true, 1, 3);
+        assert_eq!(header, vec![origin(1, 1); 3]);
+        assert_eq!(rows[0], vec![origin(1, 1); 3]);
+    }
 }
