@@ -263,7 +263,14 @@ Typer/
     ├── typst_engine.rs   # インメモリTypst組版・フォント読み込み（バックグラウンド全走査）・PDF出力・数式の画像化（SVG/PNG）
     ├── html_export.rs    # 内部文書モデル ➔ 単一HTML+CSS (画像Base64・数式SVG内包) 出力器
     ├── docx_export.rs    # 内部文書モデル ➔ Word (.docx) 出力器（自作の軽量OOXML生成、zipでパッケージ化。数式はPNG画像）
-    ├── ui.rs             # egui 2ペインデスクトップUI・検索置換・Undo/Redo・未保存保護
+    ├── ui/               # egui 2ペインデスクトップUI
+    │   ├── mod.rs        # アプリの状態・画面全体の組み立て・タブ・Undo/Redo・セッション復元
+    │   ├── toolbar.rs    # 上部ツールバー・タブバー・書式挿入バー
+    │   ├── editor.rs     # エディタ・カーソル位置への挿入・検索置換
+    │   ├── preview.rs    # 組版ワーカーとのやり取り・ページプレビュー・エラー表示
+    │   ├── file_ops.rs   # 開く・保存・自動保存・PDF/HTML/Word出力・未保存保護
+    │   ├── panels.rs     # アウトライン・文書設定バー・ステータスバー・テンプレートのダイアログ
+    │   └── shortcuts.rs  # キーボードショートカット
     ├── ui_text.rs        # エディタ用テキストユーティリティ・シンタックスハイライト
     ├── ui_persistence.rs # 設定/履歴の永続化・起動時文書決定・フォント/テーマ初期化
     └── sample.rs         # 起動時サンプル業務報告書原稿
