@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Word出力 確認用原稿</title>
+<style>
+  :root {
+    --text-color: #202124;
+    --accent-color: #1a73e8;
+    --border-color: #dadce0;
+    --table-border: #9aa0a6;
+    --header-bg: #f1f3f4;
+  }
+  body {
+    font-family: "Times New Roman", "BIZ UDPMincho", "Yu Mincho", "MS PMincho", serif;
+    font-size: 10.5pt;
+    line-height: 1.5;
+    color: var(--text-color);
+    background-color: #f8f9fa;
+    margin: 0;
+    padding: 2rem 1rem;
+  }
+  .container {
+    position: relative;
+    max-width: 840px;
+    margin: 0 auto;
+    background: #ffffff;
+    padding: 2.5rem 3rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    
+  }
+  .doc-watermark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-30deg);
+    font-size: 5rem;
+    font-weight: bold;
+    color: rgba(154, 160, 166, 0.3);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 0;
+  }
+  h1 {
+    font-size: 1.5em;
+    color: var(--accent-color);
+    border-bottom: 2px solid var(--accent-color);
+    padding-bottom: 0.3em;
+    margin-top: 1.5em;
+    margin-bottom: 0.8em;
+  }
+  h2 {
+    font-size: 1.25em;
+    border-left: 4px solid var(--accent-color);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0.15em 0 0.25em 0.5em;
+    margin-top: 1.4em;
+    margin-bottom: 0.7em;
+  }
+  h3 {
+    font-size: 1.1em;
+    color: #3c4043;
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
+  }
+  p {
+    margin: 0.75em 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    table-layout: fixed;
+  }
+  th, td {
+    border: 1px solid var(--table-border);
+    padding: 0.5rem 0.65rem;
+    vertical-align: middle;
+    word-wrap: break-word;
+  }
+  th {
+    background-color: var(--header-bg);
+    font-weight: bold;
+  }
+  blockquote {
+    margin: 1em 0;
+    padding: 0.6rem 1rem;
+    background: #f8f9fa;
+    border-left: 4px solid #80868b;
+  }
+  blockquote.boxed-quote {
+    background: #ffffff;
+    border: 1px solid #9aa0a6;
+    border-radius: 4px;
+    border-left: 1px solid #9aa0a6;
+    padding: 0.8rem 1rem;
+  }
+  pre {
+    background: #f1f3f4;
+    padding: 0.8rem 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+  code {
+    background: #f1f3f4;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-family: Consolas, monospace;
+  }
+  .math {
+    font-family: Consolas, monospace;
+    font-size: 0.95em;
+    color: #3c4043;
+  }
+  .math-display {
+    display: block;
+    text-align: center;
+    margin: 0.8em 0;
+    white-space: pre-wrap;
+  }
+  img.math-img {
+    display: inline;
+    max-width: 100%;
+  }
+  figure.doc-image {
+    margin: 1.2em 0;
+    text-align: center;
+  }
+  figure.doc-image img {
+    max-width: 85%;
+    height: auto;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+  }
+  figure.doc-image figcaption {
+    font-size: 0.9em;
+    color: #5f6368;
+    margin-top: 0.4em;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 1.5em 0;
+  }
+  .raw-typst-note {
+    margin: 1em 0;
+    border: 1px dashed #9aa0a6;
+    border-radius: 4px;
+    padding: 0.6rem 1rem;
+    background: #f8f9fa;
+  }
+  .raw-typst-note .raw-typst-label {
+    margin: 0 0 0.4em 0;
+    font-size: 0.85em;
+    color: #5f6368;
+  }
+  .raw-typst-note pre {
+    margin: 0;
+  }
+  .toc {
+    margin: 1em 0 1.5em 0;
+    padding: 0.8rem 1.2rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: #f8f9fa;
+  }
+  .toc .toc-title {
+    margin: 0 0 0.5em 0;
+    font-weight: bold;
+    color: var(--accent-color);
+  }
+  .toc ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .toc li {
+    margin: 0.25em 0;
+  }
+  .toc li a {
+    text-decoration: none;
+    color: var(--text-color);
+  }
+  .toc li a:hover {
+    text-decoration: underline;
+  }
+  .toc .toc-level-2 { padding-left: 1.2em; }
+  .toc .toc-level-3 { padding-left: 2.4em; }
+  .toc .toc-level-4 { padding-left: 3.6em; }
+  .toc .toc-level-5 { padding-left: 4.8em; }
+  .toc .toc-level-6 { padding-left: 6em; }
+  li.task-item {
+    list-style: none;
+  }
+  li.task-item > input[type="checkbox"] {
+    margin: 0 0.35em 0 -1.3em;
+    vertical-align: -0.1em;
+  }
+  .footnote-ref a {
+    text-decoration: none;
+  }
+  .footnotes {
+    margin-top: 2em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--border-color);
+    font-size: 0.85em;
+  }
+  .footnote-back {
+    text-decoration: none;
+  }
+  .doc-header, .doc-footer {
+    font-size: 0.8em;
+    color: #5f6368;
+    padding: 0.4em 0;
+  }
+  .doc-header {
+    text-align: right;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 1em;
+  }
+  .doc-footer {
+    text-align: center;
+    border-top: 1px solid var(--border-color);
+    margin-top: 1em;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="doc-header">株式会社サンプル 確認用</div>
+<h1 id="toc-heading-0">Word出力 確認用原稿</h1>
+<p>この原稿は、Word（.docx）出力をMicrosoft Wordで開いて確認するためのものです。確認項目は同じフォルダの <a href="README.md">README.md</a> を参照してください。英数字 ABC abc 123 は欧文フォント（Times New Roman）、和文は明朝体になります。</p>
+<nav class="toc">
+  <p class="toc-title">目次</p>
+  <ul>
+    <li class="toc-level-1"><a href="#toc-heading-0">Word出力 確認用原稿</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-1">1. 文字の装飾</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-2">2. リスト</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-3">3. 表</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-4">4. 引用・コード・脚注</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-5">5. 数式と画像</a></li>
+    <li class="toc-level-2"><a href="#toc-heading-6">6. 改ページ後のページ</a></li>
+  </ul>
+</nav>
+<h2 id="toc-heading-1">1. 文字の装飾</h2>
+<p><strong>太字</strong>、<em>斜体</em>、<del>取り消し線</del>、<span style="text-decoration: underline">下線</span>、<span style="color: #c5221f">赤文字</span>、<span style="font-size: 14pt">大きな文字</span>、<span style="background-color: #fff2cc">背景色付き</span>、<span style="color: #1a73e8; font-size: 12pt; background-color: #e8f0fe; text-decoration: underline">全部まとめて</span>、<code>インラインコード</code>。</p>
+<p>リンク：<a href="https://typst.app/">Typstの公式サイト</a> と <a href="mailto:info@example.com">メール</a>。文書内の見出しへのリンク：<a href="#3-表">表の章へ</a>（Wordでは見た目のみ）。</p>
+<p style="text-align: right">2026年11月25日<br>
+情報システム部</p>
+<p style="text-align: center; font-size: 16pt"><strong>中央寄せのタイトル</strong></p>
+<p style="margin-left: 20mm">この段落は左に20mm字下げされます。</p>
+<h2 id="toc-heading-2">2. リスト</h2>
+<ul>
+  <li>箇条書き1
+<ul>
+  <li>入れ子の項目
+<ul>
+  <li>さらに入れ子</li>
+</ul>
+</li>
+</ul>
+</li>
+  <li>箇条書き2</li>
+</ul>
+<ol start="3">
+  <li>3から始まる番号</li>
+  <li>次の番号
+<ol start="1">
+  <li>入れ子は1から振り直し</li>
+  <li>二番目</li>
+</ol>
+</li>
+</ol>
+<ul>
+  <li class="task-item"><input type="checkbox" disabled> 未完了のタスク</li>
+  <li class="task-item"><input type="checkbox" disabled checked> 完了したタスク</li>
+</ul>
+<h2 id="toc-heading-3">3. 表</h2>
+<table>
+  <colgroup>
+    <col style="width: 25%;">
+    <col style="width: 45%;">
+    <col style="width: 30%;">
+  </colgroup>
+  <thead>
+    <tr style="background-color: #fdf0e6">
+      <th style="text-align: left">項目</th>
+      <th style="text-align: left">内容</th>
+      <th style="text-align: center">備考</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">発生日時</td>
+      <td style="text-align: left">2026年10月14日 10:15</td>
+      <td style="text-align: center"><span style="color: #c5221f">監視</span>にて検知</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">対応</td>
+      <td style="text-align: left">セル内の<br>
+改行</td>
+      <td style="background-color: #fff2cc; text-align: center">セル全体を塗る</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">数式</td>
+      <td style="text-align: left"><img class="math-img" src="<data:image/svg+xml>" alt="$\frac{1}{2} + \frac{1}{3} = \frac{5}{6}$" style="width: 4.351em; height: 1.218em; vertical-align: -0.359em"></td>
+      <td style="text-align: center">右の列は中央寄せ</td>
+    </tr>
+  </tbody>
+</table>
+<p>セルの結合（<code>&lt;</code> は左と、<code>^</code> は上と結合）：</p>
+<table>
+  <colgroup>
+    <col style="width: 20%;">
+    <col style="width: 40%;">
+    <col style="width: 30mm;">
+  </colgroup>
+  <thead>
+    <tr>
+      <th style="text-align: left">区分</th>
+      <th colspan="2" style="text-align: center">承認</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="2" style="text-align: left">担当</td>
+      <td style="text-align: center">山田</td>
+      <td rowspan="2" style="text-align: center">印</td>
+    </tr>
+    <tr>
+      <td style="text-align: center">佐藤</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">備考</td>
+      <td colspan="2" style="text-align: center">特になし</td>
+    </tr>
+  </tbody>
+</table>
+<h2 id="toc-heading-4">4. 引用・コード・脚注</h2>
+<blockquote>
+<p>通常の引用です。</p>
+<blockquote>
+<p>入れ子の引用です。</p>
+</blockquote>
+</blockquote>
+<blockquote class="boxed-quote">
+<p>囲み枠の引用です。</p>
+</blockquote>
+<pre><code>コードブロック
+  インデントを保つ
+</code></pre>
+<p>売上は前年比120%でした<sup class="footnote-ref"><a href="#fn1" id="fnref1">1</a></sup>。同じ注をもう一度参照します<sup class="footnote-ref"><a href="#fn1">1</a></sup>。</p>
+<h2 id="toc-heading-5">5. 数式と画像</h2>
+<p>文中の数式 <img class="math-img" src="<data:image/svg+xml>" alt="$x^2 + y^2 = r^2$" style="width: 5.473em; height: 1.033em; vertical-align: -0.205em"> は本文と高さが揃います。</p>
+<p><span class="math-display"><img class="math-img" src="<data:image/svg+xml>" alt="$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$" style="width: 8.989em; height: 2.342em"></span></p>
+<p><figure class="doc-image"><img src="<data:image/png>" alt="アプリのアイコン" style="width: 30%; max-width: 100%;"><figcaption>アプリのアイコン</figcaption></figure></p>
+<h2 id="toc-heading-6">6. 改ページ後のページ</h2>
+<p>この見出しは新しいページから始まります。株式会社サンプル が差し込まれていること。</p>
+<section class="footnotes">
+<ol>
+  <li id="fn1" value="1">速報値です。詳細は<a href="https://example.com/report">こちら</a>。 <a href="#fnref1" class="footnote-back" aria-label="本文に戻る">↩</a></li>
+</ol>
+</section>
+<div class="doc-footer">社外秘</div>
+</div>
+</body>
+</html>

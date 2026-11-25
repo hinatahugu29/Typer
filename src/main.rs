@@ -5,6 +5,8 @@ mod html_export;
 mod lint;
 mod math;
 mod model;
+#[cfg(test)]
+mod output_snapshot_tests;
 mod parser;
 mod sample;
 #[cfg(test)]

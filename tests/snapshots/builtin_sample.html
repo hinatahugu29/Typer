@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文書出力</title>
+<style>
+  :root {
+    --text-color: #202124;
+    --accent-color: #1a73e8;
+    --border-color: #dadce0;
+    --table-border: #9aa0a6;
+    --header-bg: #f1f3f4;
+  }
+  body {
+    font-family: "BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.5;
+    color: var(--text-color);
+    background-color: #f8f9fa;
+    margin: 0;
+    padding: 2rem 1rem;
+  }
+  .container {
+    position: relative;
+    max-width: 840px;
+    margin: 0 auto;
+    background: #ffffff;
+    padding: 2.5rem 3rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    
+  }
+  .doc-watermark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-30deg);
+    font-size: 5rem;
+    font-weight: bold;
+    color: rgba(154, 160, 166, 0.3);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 0;
+  }
+  h1 {
+    font-size: 1.5em;
+    color: var(--accent-color);
+    border-bottom: 2px solid var(--accent-color);
+    padding-bottom: 0.3em;
+    margin-top: 1.5em;
+    margin-bottom: 0.8em;
+  }
+  h2 {
+    font-size: 1.25em;
+    border-left: 4px solid var(--accent-color);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0.15em 0 0.25em 0.5em;
+    margin-top: 1.4em;
+    margin-bottom: 0.7em;
+  }
+  h3 {
+    font-size: 1.1em;
+    color: #3c4043;
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
+  }
+  p {
+    margin: 0.75em 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    table-layout: fixed;
+  }
+  th, td {
+    border: 1px solid var(--table-border);
+    padding: 0.5rem 0.65rem;
+    vertical-align: middle;
+    word-wrap: break-word;
+  }
+  th {
+    background-color: var(--header-bg);
+    font-weight: bold;
+  }
+  blockquote {
+    margin: 1em 0;
+    padding: 0.6rem 1rem;
+    background: #f8f9fa;
+    border-left: 4px solid #80868b;
+  }
+  blockquote.boxed-quote {
+    background: #ffffff;
+    border: 1px solid #9aa0a6;
+    border-radius: 4px;
+    border-left: 1px solid #9aa0a6;
+    padding: 0.8rem 1rem;
+  }
+  pre {
+    background: #f1f3f4;
+    padding: 0.8rem 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+  code {
+    background: #f1f3f4;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-family: Consolas, monospace;
+  }
+  .math {
+    font-family: Consolas, monospace;
+    font-size: 0.95em;
+    color: #3c4043;
+  }
+  .math-display {
+    display: block;
+    text-align: center;
+    margin: 0.8em 0;
+    white-space: pre-wrap;
+  }
+  img.math-img {
+    display: inline;
+    max-width: 100%;
+  }
+  figure.doc-image {
+    margin: 1.2em 0;
+    text-align: center;
+  }
+  figure.doc-image img {
+    max-width: 85%;
+    height: auto;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+  }
+  figure.doc-image figcaption {
+    font-size: 0.9em;
+    color: #5f6368;
+    margin-top: 0.4em;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 1.5em 0;
+  }
+  .raw-typst-note {
+    margin: 1em 0;
+    border: 1px dashed #9aa0a6;
+    border-radius: 4px;
+    padding: 0.6rem 1rem;
+    background: #f8f9fa;
+  }
+  .raw-typst-note .raw-typst-label {
+    margin: 0 0 0.4em 0;
+    font-size: 0.85em;
+    color: #5f6368;
+  }
+  .raw-typst-note pre {
+    margin: 0;
+  }
+  .toc {
+    margin: 1em 0 1.5em 0;
+    padding: 0.8rem 1.2rem;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: #f8f9fa;
+  }
+  .toc .toc-title {
+    margin: 0 0 0.5em 0;
+    font-weight: bold;
+    color: var(--accent-color);
+  }
+  .toc ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .toc li {
+    margin: 0.25em 0;
+  }
+  .toc li a {
+    text-decoration: none;
+    color: var(--text-color);
+  }
+  .toc li a:hover {
+    text-decoration: underline;
+  }
+  .toc .toc-level-2 { padding-left: 1.2em; }
+  .toc .toc-level-3 { padding-left: 2.4em; }
+  .toc .toc-level-4 { padding-left: 3.6em; }
+  .toc .toc-level-5 { padding-left: 4.8em; }
+  .toc .toc-level-6 { padding-left: 6em; }
+  li.task-item {
+    list-style: none;
+  }
+  li.task-item > input[type="checkbox"] {
+    margin: 0 0.35em 0 -1.3em;
+    vertical-align: -0.1em;
+  }
+  .footnote-ref a {
+    text-decoration: none;
+  }
+  .footnotes {
+    margin-top: 2em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--border-color);
+    font-size: 0.85em;
+  }
+  .footnote-back {
+    text-decoration: none;
+  }
+  .doc-header, .doc-footer {
+    font-size: 0.8em;
+    color: #5f6368;
+    padding: 0.4em 0;
+  }
+  .doc-header {
+    text-align: right;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 1em;
+  }
+  .doc-footer {
+    text-align: center;
+    border-top: 1px solid var(--border-color);
+    margin-top: 1em;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+</div>
+</body>
+</html>
