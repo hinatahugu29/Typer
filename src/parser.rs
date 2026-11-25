@@ -953,7 +953,7 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
         }
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
-            let val = v.trim();
+            let val = clean_frontmatter_value(v);
             match key.as_str() {
                 "paper" => {
                     if !val.is_empty() {
@@ -1051,6 +1051,33 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
     }
 
     (settings, &trimmed[byte_offset..])
+}
+
+/// フロントマターの値から、行末のコメントと値を囲む引用符を取り除く。
+///
+/// マニュアルの例のように `font: gothic   # 説明` と書いた行や、YAMLの書き方に合わせて
+/// `accent-color: "#1a73e8"` と引用符で囲んだ値も読めるようにする。コメントは
+/// 「空白・`#`・空白（または行末）」で始まるものだけを対象にし、`#1a73e8` や
+/// `第 #1 報` のように `#` の直後に文字が続くものは値の一部として残す
+pub(crate) fn clean_frontmatter_value(raw: &str) -> &str {
+    let mut val = raw.trim();
+    let bytes = val.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#'
+            && i > 0
+            && bytes[i - 1].is_ascii_whitespace()
+            && bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace())
+        {
+            val = val[..i].trim_end();
+            break;
+        }
+    }
+    for quote in ['"', '\''] {
+        if val.len() >= 2 && val.starts_with(quote) && val.ends_with(quote) {
+            return &val[1..val.len() - 1];
+        }
+    }
+    val
 }
 
 /// 本文中の `{{key}}` をフロントマターで定義された変数の値に置換する。
@@ -1233,7 +1260,7 @@ impl SourceLineLocator {
 }
 
 /// `:::columns 2` のような範囲指定段組み開始行を解析し、段数を返す（値省略時は既定で2段）
-fn parse_columns_start_directive(trimmed: &str) -> Option<u8> {
+pub(crate) fn parse_columns_start_directive(trimmed: &str) -> Option<u8> {
     let rest = trimmed
         .strip_prefix(":::columns")
         .or_else(|| trimmed.strip_prefix("::: columns"))?;
@@ -1250,7 +1277,7 @@ fn parse_columns_start_directive(trimmed: &str) -> Option<u8> {
 }
 
 /// `:::columns-end` / `:::end-columns` のような範囲指定段組みの終了行かどうかを判定する
-fn is_columns_end_directive(trimmed: &str) -> bool {
+pub(crate) fn is_columns_end_directive(trimmed: &str) -> bool {
     let normalized = trimmed.to_ascii_lowercase().replace(' ', "");
     matches!(
         normalized.as_str(),
@@ -1260,7 +1287,7 @@ fn is_columns_end_directive(trimmed: &str) -> bool {
 
 /// `:::space 1em` のような明示的な垂直空白指定行を解析し、高さの文字列を返す
 /// （値省略時は既定で "1em"）
-fn parse_space_directive(trimmed: &str) -> Option<String> {
+pub(crate) fn parse_space_directive(trimmed: &str) -> Option<String> {
     let rest = trimmed
         .strip_prefix(":::space")
         .or_else(|| trimmed.strip_prefix("::: space"))?;
@@ -1276,7 +1303,7 @@ fn parse_space_directive(trimmed: &str) -> Option<String> {
 }
 
 /// 単独行が `{widths: ...}` や `{align: right}` のようなブロック属性指定行かどうかを判定する
-fn is_standalone_block_attr_line(trimmed: &str) -> bool {
+pub(crate) fn is_standalone_block_attr_line(trimmed: &str) -> bool {
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') || trimmed.len() < 4 {
         return false;
     }
@@ -1811,7 +1838,7 @@ fn parse_inline_style(spec: &str) -> Option<InlineStyle> {
     }
 }
 
-fn normalize_color(raw: &str) -> Option<String> {
+pub(crate) fn normalize_color(raw: &str) -> Option<String> {
     let low = raw.trim().to_ascii_lowercase();
     match low.as_str() {
         "red" | "赤" => Some("#c5221f".to_string()),
@@ -2434,6 +2461,25 @@ line-height: 1.4
             Block::Spacer { height } => assert_eq!(height, "1em"),
             other => panic!("expected spacer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_frontmatter_values_accept_quotes_and_trailing_comments() {
+        // マニュアルに載せている書き方（行末コメント・引用符付きの色）をそのまま読めること
+        let src = "---\ntitle: 月次報告書    # 省略可\nfont: gothic             # gothic / mincho\naccent-color: \"#1a73e8\"\nheader: 第 #1 報\nfooter: '社外秘'\n会社名: 株式会社サンプル   # 独自変数\n---\n\n{{会社名}}\n";
+        let doc = parse_document(src);
+        assert_eq!(doc.settings.title.as_deref(), Some("月次報告書"));
+        assert_eq!(doc.settings.font_choice, FontChoice::Gothic);
+        assert_eq!(doc.settings.accent_color, "#1a73e8");
+        assert_eq!(doc.settings.header_text.as_deref(), Some("第 #1 報"));
+        assert_eq!(doc.settings.footer_text.as_deref(), Some("社外秘"));
+        assert_eq!(
+            doc.settings.custom_vars.get("会社名").map(String::as_str),
+            Some("株式会社サンプル")
+        );
+        // 引用符のない色指定は従来どおり
+        let plain = parse_document("---\naccent-color: #e37400\n---\n本文\n");
+        assert_eq!(plain.settings.accent_color, "#e37400");
     }
 
     #[test]
