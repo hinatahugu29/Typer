@@ -52,7 +52,13 @@ pub fn parse_document(input: &str) -> Document {
         vars.entry("title".to_string()).or_insert_with(|| title.clone());
     }
     let substituted = substitute_custom_vars(body, &vars);
-    let preprocessed = preprocess_block_directives(&substituted);
+    let (preprocessed, line_map) = preprocess_block_directives(&substituted);
+    // `body` は `input` の末尾部分なので、その手前（フロントマター）の行数を数えれば本文の開始行が分かる。
+    // 変数の差し込みは1行ずつ置き換えるだけで行数を変えないため、そのまま対応づけられる
+    let body_offset = input[..input.len() - body.len()].matches('\n').count();
+    let locator = SourceLineLocator::new(&preprocessed, line_map, body_offset);
+    // 段落・見出しは終わりのイベントでブロックを作るため、始まった行を覚えておく
+    let mut text_block_line: Option<usize> = None;
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -91,31 +97,37 @@ pub fn parse_document(input: &str) -> Document {
                 if is_block_tag(&tag) {
                     flush_tight_item_text(&mut stack, &mut blocks, &mut current_inlines);
                 }
+                let line = locator.line_at(range.start);
                 match tag {
                     Tag::Heading { level, .. } => {
                         in_heading = Some(heading_level_to_u8(level));
+                        text_block_line = Some(line);
                         current_inlines.clear();
                     }
                     Tag::Paragraph => {
+                        text_block_line = Some(line);
                         current_inlines.clear();
                     }
                     Tag::BlockQuote(_) => {
                         stack.push(Frame::Quote {
                             blocks: Vec::new(),
-                            attrs: std::mem::take(&mut pending_attrs),
+                            attrs: take_attrs_at(&mut pending_attrs, line),
                         });
                     }
                     Tag::List(start_num) => {
                         stack.push(Frame::List {
                             ordered: start_num.is_some(),
                             start: start_num.unwrap_or(1),
-                            attrs: std::mem::take(&mut pending_attrs),
+                            attrs: take_attrs_at(&mut pending_attrs, line),
                             items: Vec::new(),
                         });
                     }
                     Tag::Item => {
                         current_inlines.clear();
-                        stack.push(Frame::Item(ListItem::default()));
+                        stack.push(Frame::Item(ListItem {
+                            source_line: Some(line),
+                            ..ListItem::default()
+                        }));
                     }
                     Tag::FootnoteDefinition(label) => {
                         stack.push(Frame::Footnote {
@@ -130,7 +142,7 @@ pub fn parse_document(input: &str) -> Document {
                             }
                             _ => None,
                         };
-                        let attrs = std::mem::take(&mut pending_attrs);
+                        let attrs = take_attrs_at(&mut pending_attrs, line);
                         in_code_block = Some((lang, attrs));
                         code_buffer.clear();
                     }
@@ -144,7 +156,7 @@ pub fn parse_document(input: &str) -> Document {
                                 CmarkAlign::Right => Some(Alignment::Right),
                             })
                             .collect();
-                        let attrs = std::mem::take(&mut pending_attrs);
+                        let attrs = take_attrs_at(&mut pending_attrs, line);
                         in_table = Some(TableState {
                             alignments: mapped_aligns,
                             headers: Vec::new(),
@@ -195,7 +207,8 @@ pub fn parse_document(input: &str) -> Document {
                 TagEnd::Heading(_) => {
                     if let Some(level) = in_heading.take() {
                         let content = expand_custom_inlines(std::mem::take(&mut current_inlines));
-                        let attrs = std::mem::take(&mut pending_attrs);
+                        let mut attrs = std::mem::take(&mut pending_attrs);
+                        attrs.source_line = text_block_line.take();
                         let block = Block::Heading {
                             level,
                             content,
@@ -261,7 +274,8 @@ pub fn parse_document(input: &str) -> Document {
                     }
 
                     let content = expand_custom_inlines(raw_inlines);
-                    let attrs = std::mem::take(&mut pending_attrs);
+                    let mut attrs = std::mem::take(&mut pending_attrs);
+                    attrs.source_line = text_block_line.take();
                     let block = Block::Paragraph { content, attrs };
                     emit_block(&mut stack, &mut blocks, block);
                 }
@@ -417,6 +431,13 @@ pub fn parse_document(input: &str) -> Document {
     resolve_footnotes(&mut blocks, &footnote_defs);
 
     Document { settings, blocks }
+}
+
+/// 直前の属性行で指定された属性を取り出し、ブロックの開始行を記録して返す
+fn take_attrs_at(pending: &mut BlockAttributes, line: usize) -> BlockAttributes {
+    let mut attrs = std::mem::take(pending);
+    attrs.source_line = Some(line);
+    attrs
 }
 
 /// ブロックの入れ子を管理するスタックの1段
@@ -1090,23 +1111,37 @@ fn replace_vars_in_line(line: &str, vars: &std::collections::BTreeMap<String, St
 
 /// 単独行のブロック属性 `{widths: ...}`, `{align: ...}` や `:::pagebreak` を
 /// 前後に空行を持つ独立マーカーに変換し、直後の表や段落と混ざらないようにする
-fn preprocess_block_directives(body: &str) -> String {
+///
+/// 指示行は前後の空行を含む3行に展開されるため、変換後の各行が元の本文の何行目
+/// （0始まり）に由来するかの対応表も一緒に返す（組版エラーを原稿の行へ戻すのに使う）
+fn preprocess_block_directives(body: &str) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(body.len() + 128);
+    let mut line_map: Vec<usize> = Vec::new();
     let mut in_fenced_code = false;
 
-    for line in body.lines() {
+    // 指示行を「空行・マーカー行・空行」の3行に展開する
+    let push_marker = |out: &mut String, line_map: &mut Vec<usize>, marker: &str, src: usize| {
+        out.push('\n');
+        out.push_str(marker);
+        out.push_str("\n\n");
+        line_map.extend([src, src, src]);
+    };
+
+    for (src, line) in body.lines().enumerate() {
         let trimmed = line.trim();
 
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fenced_code = !in_fenced_code;
             out.push_str(line);
             out.push('\n');
+            line_map.push(src);
             continue;
         }
 
         if in_fenced_code {
             out.push_str(line);
             out.push('\n');
+            line_map.push(src);
             continue;
         }
 
@@ -1114,9 +1149,7 @@ fn preprocess_block_directives(body: &str) -> String {
             || trimmed.eq_ignore_ascii_case("{pagebreak}")
             || trimmed.eq_ignore_ascii_case("::: pagebreak")
         {
-            out.push('\n');
-            out.push_str(PAGEBREAK_MARKER);
-            out.push_str("\n\n");
+            push_marker(&mut out, &mut line_map, PAGEBREAK_MARKER, src);
             continue;
         }
 
@@ -1124,52 +1157,77 @@ fn preprocess_block_directives(body: &str) -> String {
             || trimmed.eq_ignore_ascii_case("{toc}")
             || trimmed.eq_ignore_ascii_case("::: toc")
         {
-            out.push('\n');
-            out.push_str(TOC_MARKER);
-            out.push_str("\n\n");
+            push_marker(&mut out, &mut line_map, TOC_MARKER, src);
             continue;
         }
 
         if let Some(count) = parse_columns_start_directive(trimmed) {
-            out.push('\n');
-            out.push_str(COLUMNS_START_MARKER_PREFIX);
-            out.push_str(&count.to_string());
-            out.push_str(COLUMNS_START_MARKER_SUFFIX);
-            out.push_str("\n\n");
+            let marker = format!("{COLUMNS_START_MARKER_PREFIX}{count}{COLUMNS_START_MARKER_SUFFIX}");
+            push_marker(&mut out, &mut line_map, &marker, src);
             continue;
         }
 
         if is_columns_end_directive(trimmed) {
-            out.push('\n');
-            out.push_str(COLUMNS_END_MARKER);
-            out.push_str("\n\n");
+            push_marker(&mut out, &mut line_map, COLUMNS_END_MARKER, src);
             continue;
         }
 
         if let Some(height) = parse_space_directive(trimmed) {
-            out.push('\n');
-            out.push_str(SPACE_MARKER_PREFIX);
-            out.push_str(&height);
-            out.push_str(SPACE_MARKER_SUFFIX);
-            out.push_str("\n\n");
+            let marker = format!("{SPACE_MARKER_PREFIX}{height}{SPACE_MARKER_SUFFIX}");
+            push_marker(&mut out, &mut line_map, &marker, src);
             continue;
         }
 
         if is_standalone_block_attr_line(trimmed) {
             let inner = &trimmed[1..trimmed.len() - 1];
-            out.push('\n');
-            out.push_str(ATTR_MARKER_PREFIX);
-            out.push_str(inner.trim());
-            out.push_str(ATTR_MARKER_SUFFIX);
-            out.push_str("\n\n");
+            let marker = format!("{ATTR_MARKER_PREFIX}{}{ATTR_MARKER_SUFFIX}", inner.trim());
+            push_marker(&mut out, &mut line_map, &marker, src);
             continue;
         }
 
         out.push_str(line);
         out.push('\n');
+        line_map.push(src);
     }
 
-    out
+    (out, line_map)
+}
+
+/// 前処理後の本文のバイト位置から、原稿全体での行番号（1始まり）を求める
+struct SourceLineLocator {
+    /// 前処理後の本文の各行の先頭バイト位置
+    line_starts: Vec<usize>,
+    /// 前処理後の行 → 本文の行（0始まり）
+    line_map: Vec<usize>,
+    /// 本文より前にある行数（フロントマター）
+    body_offset: usize,
+}
+
+impl SourceLineLocator {
+    fn new(preprocessed: &str, line_map: Vec<usize>, body_offset: usize) -> Self {
+        let line_starts = std::iter::once(0)
+            .chain(preprocessed.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        Self {
+            line_starts,
+            line_map,
+            body_offset,
+        }
+    }
+
+    fn line_at(&self, byte_offset: usize) -> usize {
+        let idx = self
+            .line_starts
+            .partition_point(|&start| start <= byte_offset)
+            .saturating_sub(1);
+        let body_line = self
+            .line_map
+            .get(idx)
+            .copied()
+            .or_else(|| self.line_map.last().copied())
+            .unwrap_or(0);
+        self.body_offset + body_line + 1
+    }
 }
 
 /// `:::columns 2` のような範囲指定段組み開始行を解析し、段数を返す（値省略時は既定で2段）
@@ -2345,6 +2403,47 @@ line-height: 1.4
         match &doc.blocks[2] {
             Block::Spacer { height } => assert_eq!(height, "1em"),
             other => panic!("expected spacer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_blocks_remember_their_manuscript_line() {
+        // フロントマター（3行）と、3行に展開される属性行・改ページ指定があっても、
+        // 各ブロックが原稿の何行目から始まるかを正しく覚えていること
+        let src = "---\ntitle: t\n---\n# 見出し\n\n{align: right}\n右寄せ\n\n:::pagebreak\n\n- 項目A\n- 項目B\n";
+        let doc = parse_document(src);
+        let lines: Vec<Option<usize>> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { attrs, .. }
+                | Block::Paragraph { attrs, .. }
+                | Block::List { attrs, .. } => attrs.source_line,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, vec![Some(4), Some(7), None, Some(11)]);
+        match &doc.blocks[3] {
+            Block::List { items, .. } => {
+                assert_eq!(items[0].source_line, Some(11));
+                assert_eq!(items[1].source_line, Some(12));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+        // 位置情報は書式ではないので、属性が空かどうかの判定には影響しない
+        match &doc.blocks[0] {
+            Block::Heading { attrs, .. } => assert!(attrs.is_empty()),
+            other => panic!("expected heading, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_source_lines_with_crlf_and_bom() {
+        let src = "\u{feff}---\r\ntitle: t\r\n---\r\n\r\n本文\r\n";
+        let doc = parse_document(src);
+        match &doc.blocks[0] {
+            Block::Paragraph { attrs, .. } => assert_eq!(attrs.source_line, Some(5)),
+            other => panic!("expected paragraph, got {other:?}"),
         }
     }
 

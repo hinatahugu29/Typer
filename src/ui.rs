@@ -23,9 +23,10 @@ use crate::parser::{
 };
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{
-    HeadingPosition, PreviewOutput, TypstEngine, available_font_families, available_latin_font_families,
+    CompileError, DescribedError, HeadingPosition, PreviewOutput, TypstEngine, available_font_families,
+    available_latin_font_families,
 };
-use crate::typst_gen::generate_typst_source_with_base;
+use crate::typst_gen::{SourceLineMap, generate_typst_source_with_base, generate_typst_source_with_map};
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
 use crate::ui_persistence::{
@@ -34,7 +35,7 @@ use crate::ui_persistence::{
     save_session, setup_japanese_fonts, setup_visual_theme,
 };
 use crate::ui_text::{
-    byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
+    byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown, line_char_range,
     is_valid_hex_color,
 };
 
@@ -118,7 +119,7 @@ enum WorkerRequest {
 enum WorkerResponse {
     PreviewReady {
         revision: u64,
-        result: Result<PreviewOutput, String>,
+        result: Result<PreviewOutput, CompileError>,
     },
 }
 
@@ -217,7 +218,10 @@ pub struct TyperApp {
     /// レンダリング済みページテクスチャ
     page_textures: Vec<(TextureHandle, Vec2)>,
     last_compile_ms: f64,
-    last_error: Option<String>,
+    /// 直近の組版エラー（原稿の行番号付き）
+    last_error: Option<Vec<DescribedError>>,
+    /// 直近に生成したTypstコードの各行が原稿の何行目に由来するか（エラー位置の表示用）
+    last_line_map: SourceLineMap,
 
     /// プレビュー表示倍率（1.0 = 100%）
     zoom: f32,
@@ -351,6 +355,7 @@ impl TyperApp {
             page_textures: Vec::new(),
             last_compile_ms: 0.0,
             last_error: None,
+            last_line_map: SourceLineMap::default(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,
@@ -476,7 +481,9 @@ impl TyperApp {
     fn trigger_preview_update(&mut self) {
         let doc = parse_document(&self.markdown_text);
         let base = self.base_dir();
-        self.last_typst_code = generate_typst_source_with_base(&doc, base.as_deref());
+        let (typst_code, line_map) = generate_typst_source_with_map(&doc, base.as_deref());
+        self.last_typst_code = typst_code;
+        self.last_line_map = line_map;
         self.is_compiling = true;
         self.pending_render = false;
 
@@ -523,7 +530,8 @@ impl TyperApp {
                             }
                         }
                         Err(err) => {
-                            self.last_error = Some(err);
+                            // 古い結果は上で捨てているので、この対応表は同じ版の原稿から作ったもの
+                            self.last_error = Some(err.describe(Some(&self.last_line_map)));
                         }
                     }
                 }
@@ -788,7 +796,7 @@ impl TyperApp {
             let start = Instant::now();
             let doc = self.parse_for_export();
             let base = self.base_dir();
-            let typst_code = generate_typst_source_with_base(&doc, base.as_deref());
+            let (typst_code, line_map) = generate_typst_source_with_map(&doc, base.as_deref());
             let mut engine = TypstEngine::new();
             match engine.export_pdf(&typst_code) {
                 Ok(pdf_bytes) => match std::fs::write(&path, pdf_bytes) {
@@ -803,7 +811,12 @@ impl TyperApp {
                     }
                 },
                 Err(e) => {
-                    self.status_message = format!("PDF組版エラー: {e}");
+                    let described: Vec<String> = e
+                        .describe(Some(&line_map))
+                        .into_iter()
+                        .map(|d| d.text)
+                        .collect();
+                    self.status_message = format!("PDF組版エラー: {}", described.join(" / "));
                 }
             }
         }
@@ -1137,6 +1150,57 @@ impl TyperApp {
             ) {
                 self.insert_image_path(&path);
             }
+        }
+    }
+
+    /// エディタのカーソルを原稿の指定行（1始まり）へ移し、その行を選択して表示する
+    fn jump_to_source_line(&mut self, line: usize) {
+        let Some((start, end)) = line_char_range(&self.markdown_text, line) else {
+            return;
+        };
+        self.cursor_char_range = Some((start, end));
+        self.pending_cursor_selection = Some((start, end));
+        self.status_message = format!("原稿の{line}行目へ移動しました");
+    }
+
+    /// プレビュー上部の組版エラー欄を描画する。原稿の行が分かるものはクリックでその行へ移動できる
+    fn draw_message_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(errors) = &self.last_error else {
+            return;
+        };
+        let error_color = Color32::from_rgb(197, 34, 31);
+        let mut jump_to: Option<usize> = None;
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(253, 232, 230))
+            .inner_margin(8.0)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("⚠ 組版エラー（直前のプレビューを表示しています）")
+                        .small()
+                        .strong()
+                        .color(error_color),
+                );
+                for err in errors {
+                    let text = RichText::new(&err.text).small().color(error_color);
+                    match err.source_line {
+                        Some(line) => {
+                            if ui
+                                .add(egui::Label::new(text.underline()).sense(Sense::click()))
+                                .on_hover_text("クリックで原稿のこの行へ移動します")
+                                .clicked()
+                            {
+                                jump_to = Some(line);
+                            }
+                        }
+                        None => {
+                            ui.label(text);
+                        }
+                    }
+                }
+            });
+        if let Some(line) = jump_to {
+            self.jump_to_source_line(line);
         }
     }
 
@@ -2012,19 +2076,7 @@ impl eframe::App for TyperApp {
                 .size_range(320.0..=1200.0)
         };
         preview_panel.show(ui, |ui| {
-                if let Some(err) = &self.last_error {
-                    egui::Frame::NONE
-                        .fill(Color32::from_rgb(253, 232, 230))
-                        .inner_margin(8.0)
-                        .corner_radius(4.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("⚠ 構文・組版メッセージ: {err}"))
-                                    .small()
-                                    .color(Color32::from_rgb(197, 34, 31)),
-                            );
-                        });
-                }
+                self.draw_message_panel(ui);
 
                 if self.show_typst_source {
                     egui::Panel::bottom("typst_source_inspector")
@@ -2508,6 +2560,25 @@ mod tests {
         assert_eq!(char_idx_to_line_col(s, 4), (2, 1));
     }
 
+    #[test]
+    fn test_line_char_range_and_jump_to_source_line() {
+        let s = "あいう\r\nえお\n\nか";
+        assert_eq!(line_char_range(s, 1), Some((0, 3)));
+        assert_eq!(line_char_range(s, 2), Some((5, 7)));
+        assert_eq!(line_char_range(s, 3), Some((8, 8)));
+        assert_eq!(line_char_range(s, 4), Some((9, 10)));
+        assert_eq!(line_char_range(s, 5), None);
+        assert_eq!(line_char_range(s, 0), None);
+
+        let mut app = test_app("# 見出し\n\n本文の行\n");
+        app.jump_to_source_line(3);
+        assert_eq!(app.pending_cursor_selection, Some((7, 11)));
+        // 存在しない行へは移動しない
+        app.pending_cursor_selection = None;
+        app.jump_to_source_line(99);
+        assert_eq!(app.pending_cursor_selection, None);
+    }
+
     /// `TyperApp::new` はウィンドウ・GPUコンテキストを要するため、
     /// テキスト編集系ロジックのみを検証するための軽量インスタンスを直接構築する
     fn test_app(markdown: &str) -> TyperApp {
@@ -2540,6 +2611,7 @@ mod tests {
             page_textures: Vec::new(),
             last_compile_ms: 0.0,
             last_error: None,
+            last_line_map: SourceLineMap::default(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,

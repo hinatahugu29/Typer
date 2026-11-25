@@ -222,7 +222,7 @@ impl TypstEngine {
     }
 
     /// Typstソース文字列を差分更新してコンパイルし、`PagedDocument` を返す
-    fn compile_document(&mut self, typst_code: &str) -> Result<PagedDocument, String> {
+    fn compile_document(&mut self, typst_code: &str) -> Result<PagedDocument, CompileError> {
         // プレビュー用ワーカーはエンジンを使い回すため、バックグラウンド全走査の完了後に
         // ここでフォント集合を差し替えないと、起動直後の決め打ちリストのまま描画され続ける
         let shared = get_shared_resources();
@@ -234,19 +234,15 @@ impl TypstEngine {
         let warned = typst::compile::<PagedDocument>(self);
         match warned.output {
             Ok(doc) => Ok(doc),
-            Err(errors) => {
-                let mut msg = String::new();
-                for err in errors.iter() {
-                    if !msg.is_empty() {
-                        msg.push('\n');
-                    }
-                    if let Some(line) = self.span_to_line(err.span) {
-                        msg.push_str(&format!("[生成コード {line}行目] "));
-                    }
-                    msg.push_str(&err.message);
-                }
-                Err(msg)
-            }
+            Err(errors) => Err(CompileError {
+                diagnostics: errors
+                    .iter()
+                    .map(|err| CompileDiagnostic {
+                        generated_line: self.span_to_line(err.span),
+                        message: err.message.to_string(),
+                    })
+                    .collect(),
+            }),
         }
     }
 
@@ -262,7 +258,7 @@ impl TypstEngine {
         &mut self,
         typst_code: &str,
         pixel_per_pt: f32,
-    ) -> Result<PreviewOutput, String> {
+    ) -> Result<PreviewOutput, CompileError> {
         let start = Instant::now();
         let doc = self.compile_document(typst_code)?;
 
@@ -332,15 +328,71 @@ impl TypstEngine {
     }
 
     /// PDFバイナリをメモリ上で生成して返す
-    pub fn export_pdf(&mut self, typst_code: &str) -> Result<Vec<u8>, String> {
+    pub fn export_pdf(&mut self, typst_code: &str) -> Result<Vec<u8>, CompileError> {
         let doc = self.compile_document(typst_code)?;
         let options = PdfOptions::default();
-        typst_pdf::pdf(&doc, &options).map_err(|errs| {
-            errs.iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
+        typst_pdf::pdf(&doc, &options).map_err(|errs| CompileError {
+            diagnostics: errs
+                .iter()
+                .map(|e| CompileDiagnostic {
+                    generated_line: None,
+                    message: e.message.to_string(),
+                })
+                .collect(),
         })
+    }
+}
+
+/// 組版エラー1件分
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileDiagnostic {
+    /// エラー箇所の、生成したTypstコード上の行番号（1始まり。位置が分からなければ `None`）
+    pub generated_line: Option<usize>,
+    pub message: String,
+}
+
+/// 組版に失敗したときのエラー一覧
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileError {
+    pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+impl CompileError {
+    /// 各エラーを、原稿の行番号付き（分かれば）のメッセージにする。
+    /// `map` で原稿の行に戻せないエラーは、従来どおり生成コードの行番号を付ける
+    pub fn describe(&self, map: Option<&crate::typst_gen::SourceLineMap>) -> Vec<DescribedError> {
+        self.diagnostics
+            .iter()
+            .map(|d| {
+                let source_line = d
+                    .generated_line
+                    .and_then(|g| map.and_then(|m| m.source_line_for(g)));
+                let location = match (source_line, d.generated_line) {
+                    (Some(line), _) => format!("[原稿 {line}行目] "),
+                    (None, Some(line)) => format!("[生成コード {line}行目] "),
+                    (None, None) => String::new(),
+                };
+                DescribedError {
+                    source_line,
+                    text: format!("{location}{}", d.message),
+                }
+            })
+            .collect()
+    }
+}
+
+/// 表示用に整えた組版エラー
+#[derive(Debug, Clone, PartialEq)]
+pub struct DescribedError {
+    /// 原稿上の行番号（1始まり）。クリックでエディタをその行へ移動するのに使う
+    pub source_line: Option<usize>,
+    pub text: String,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let lines: Vec<String> = self.describe(None).into_iter().map(|d| d.text).collect();
+        f.write_str(&lines.join("\n"))
     }
 }
 
@@ -611,13 +663,46 @@ mod tests {
         let mut engine = TypstEngine::new();
 
         let err = match engine.render_preview(&typst_code, 1.5) {
-            Err(e) => e,
+            Err(e) => e.to_string(),
             Ok(_) => panic!("unbalanced bracket should fail to compile"),
         };
         assert!(
             err.contains("[生成コード") && err.contains("行目]"),
             "error message should include a generated-code line number: {err}"
         );
+    }
+
+    #[test]
+    fn test_compile_error_maps_back_to_manuscript_line() {
+        // フロントマター・属性行・改ページ指定で行がずれても、壊れたTypstコードの行
+        // （原稿の9行目）を指せることを確認する
+        let src = "---\ntitle: テスト\n---\n\n{align: right}\n本文\n\n```typst\n#box[閉じていない\n```\n";
+        let doc = parse_document(src);
+        let (typst_code, map) = crate::typst_gen::generate_typst_source_with_map(&doc, None);
+        let mut engine = TypstEngine::new();
+        let err = match engine.render_preview(&typst_code, 1.5) {
+            Err(e) => e,
+            Ok(_) => panic!("unbalanced bracket should fail to compile"),
+        };
+        let described = err.describe(Some(&map));
+        assert!(
+            described.iter().any(|d| d.source_line == Some(9) && d.text.starts_with("[原稿 9行目]")),
+            "{described:?}"
+        );
+    }
+
+    #[test]
+    fn test_error_inside_a_quote_points_to_the_nested_line() {
+        let src = "# 見出し\n\n:::pagebreak\n\n> 説明文\n>\n> ```typst\n> #let x = (\n> ```\n";
+        let doc = parse_document(src);
+        let (typst_code, map) = crate::typst_gen::generate_typst_source_with_map(&doc, None);
+        let mut engine = TypstEngine::new();
+        let err = match engine.render_preview(&typst_code, 1.5) {
+            Err(e) => e,
+            Ok(_) => panic!("an unclosed paren should fail to compile"),
+        };
+        let lines: Vec<_> = err.describe(Some(&map)).into_iter().map(|d| d.source_line).collect();
+        assert!(lines.contains(&Some(8)), "{lines:?}");
     }
 
     #[test]

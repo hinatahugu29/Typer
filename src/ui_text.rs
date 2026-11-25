@@ -27,6 +27,23 @@ pub(crate) fn byte_to_char_idx(s: &str, byte_idx: usize) -> usize {
 }
 
 /// 文字インデックスから 1始まりの `(行番号, 列番号)` を計算する
+/// 1始まりの行番号から、その行の先頭と末尾（改行を含まない）の文字インデックスを返す。
+/// 行が存在しなければ `None`
+pub(crate) fn line_char_range(s: &str, line: usize) -> Option<(usize, usize)> {
+    if line == 0 {
+        return None;
+    }
+    let mut start = 0usize;
+    for (i, text) in s.split('\n').enumerate() {
+        let len = text.trim_end_matches('\r').chars().count();
+        if i + 1 == line {
+            return Some((start, start + len));
+        }
+        start += text.chars().count() + 1;
+    }
+    None
+}
+
 pub(crate) fn char_idx_to_line_col(s: &str, char_idx: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;

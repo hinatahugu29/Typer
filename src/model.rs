@@ -120,6 +120,9 @@ pub struct BlockAttributes {
     pub indent_left: Option<String>,
     /// ブロック単位の右インデント（例: "20mm", "2em"）
     pub indent_right: Option<String>,
+    /// このブロックが始まる原稿上の行番号（1始まり、フロントマターを含む原稿全体での行）。
+    /// 書式ではなく、組版エラーを原稿の行へ対応づけるための位置情報（`is_empty` の判定には含めない）
+    pub source_line: Option<usize>,
 }
 
 impl BlockAttributes {
@@ -146,6 +149,8 @@ pub struct ListItem {
     pub children: Vec<Block>,
     /// チェックリストの項目（`- [ ]` / `- [x]`）なら `Some(チェック済みか)`
     pub checked: Option<bool>,
+    /// この項目が始まる原稿上の行番号（1始まり。`BlockAttributes::source_line` と同じ）
+    pub source_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
