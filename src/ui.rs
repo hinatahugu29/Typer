@@ -1241,12 +1241,12 @@ impl TyperApp {
             .inner_margin(8.0)
             .corner_radius(4.0)
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new("⚠ 組版エラー（直前のプレビューを表示しています）")
-                        .small()
-                        .strong()
-                        .color(error_color),
-                );
+                let heading = if self.page_textures.is_empty() {
+                    "⚠ 組版エラー（直すとプレビューが表示されます）"
+                } else {
+                    "⚠ 組版エラー（直前のプレビューを表示しています）"
+                };
+                ui.label(RichText::new(heading).small().strong().color(error_color));
                 for err in errors {
                     let text = RichText::new(&err.text).small().color(error_color);
                     match err.source_line {
