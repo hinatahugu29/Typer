@@ -2,9 +2,9 @@
 //!
 //! 外部のdocx生成専用クレートに頼らず、最小限の有効なOOXML（Office Open XML）を直接組み立てて
 //! `zip` クレートでパッケージングする。見出し・段落・表・リスト・改ページ・目次（Wordのフィールド
-//! コードによる自動生成TOC）、PNG/JPEG/GIFのローカル画像埋め込みに対応する。
-//! SVG/WebP画像、画像の浮動配置（`float: true`）、実クリック可能なハイパーリンクは
-//! 今回も非対応（代替としてテキスト表記で出力する）。
+//! コードによる自動生成TOC）、PNG/JPEG/GIFのローカル画像埋め込み、クリックできるリンク、
+//! 文字・セルの背景色に対応する。SVG/WebP画像と画像の浮動配置（`float: true`）は非対応
+//! （代替としてテキスト表記・通常の配置で出力する）。文書内の見出しへのリンク（`#...`）は見た目のみ。
 
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -38,6 +38,8 @@ struct DocxImageCollector {
     footnotes: Vec<String>,
     /// 文書内の脚注の通し番号 → Wordの脚注ID（同じ脚注への2回目以降の参照に使う）
     footnote_ids: std::collections::HashMap<usize, usize>,
+    /// クリックできるリンクの (relationship ID, リンク先) 。`document.xml.rels` に書き出す
+    links: Vec<(String, String)>,
 }
 
 /// Wordの段落番号の定義1件分（`<w:num>`）
@@ -73,6 +75,21 @@ impl DocxImageCollector {
         );
         self.footnotes.push(runs);
         self.footnotes.len()
+    }
+
+    /// クリックできるリンクとして登録し、本文から参照する relationship ID を返す。
+    /// 文書内の見出しへのリンク（`#...`）や空のリンク先は、Wordではしおりが必要なため登録しない
+    fn register_link(&mut self, url: &str) -> Option<String> {
+        let url = url.trim();
+        if url.is_empty() || url.starts_with('#') {
+            return None;
+        }
+        if let Some((id, _)) = self.links.iter().find(|(_, u)| u == url) {
+            return Some(id.clone());
+        }
+        let id = format!("rIdLink{}", self.links.len() + 1);
+        self.links.push((id.clone(), url.to_string()));
+        Some(id)
     }
 
     fn push_image(&mut self, content_type: &'static str, ext: &str, bytes: Vec<u8>) -> String {
@@ -226,7 +243,11 @@ pub fn generate_docx_bytes_with_base(
     };
     let body_xml = render_docx_body(&doc.blocks, base_dir, &mut images);
     let document_xml = wrap_document_xml(&doc, &body_xml);
-    build_docx_zip(&document_xml, &styles_xml(doc), &images)
+    let header_footer = HeaderFooter {
+        header: header_xml(doc),
+        footer: footer_xml(doc),
+    };
+    build_docx_zip(&document_xml, &styles_xml(doc), &images, &header_footer)
 }
 
 /// 文書既定フォント（和文=eastAsia、欧文=ascii/hAnsi）を `docDefaults` に定義する
@@ -265,19 +286,105 @@ fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
         Orientation::Landscape => (16838, 11906), // A4 in twips (横)
     };
     let margin_twips = length_to_twips(&s.margin, 1134); // 既定20mm相当
+    // ヘッダー・フッターは用紙の端から余白の半分の位置に置く（本文と重ならないように）
+    let header_distance = margin_twips / 2;
+    let mut references = String::new();
+    if header_xml(doc).is_some() {
+        references.push_str("\n      <w:headerReference w:type=\"default\" r:id=\"rIdHeader1\"/>");
+    }
+    if footer_xml(doc).is_some() {
+        references.push_str("\n      <w:footerReference w:type=\"default\" r:id=\"rIdFooter1\"/>");
+    }
 
+    // `w:sectPr` の子要素は headerReference → footerReference → pgSz → pgMar の順。
+    // `w:pgMar` の header / footer / gutter はスキーマ上の必須属性
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
 {body_xml}
-    <w:sectPr>
+    <w:sectPr>{references}
       <w:pgSz w:w="{page_w}" w:h="{page_h}"/>
-      <w:pgMar w:top="{margin_twips}" w:right="{margin_twips}" w:bottom="{margin_twips}" w:left="{margin_twips}"/>    </w:sectPr>
+      <w:pgMar w:top="{margin_twips}" w:right="{margin_twips}" w:bottom="{margin_twips}" w:left="{margin_twips}" w:header="{header_distance}" w:footer="{header_distance}" w:gutter="0"/>
+    </w:sectPr>
   </w:body>
 </w:document>
 "#
     )
+}
+
+/// ヘッダー・フッターの文字の書式（PDFと同じ灰色・8pt）
+const HEADER_FOOTER_RPR: &str = "<w:rPr><w:color w:val=\"5F6368\"/><w:sz w:val=\"16\"/></w:rPr>";
+
+fn header_footer_text_run(text: &str) -> String {
+    format!(
+        "<w:r>{HEADER_FOOTER_RPR}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
+        xml_escape(text)
+    )
+}
+
+/// 「現在のページ / 総ページ数」をWordのフィールドで書く（Wordが開いたときに計算する）
+fn page_number_runs() -> String {
+    format!(
+        "<w:fldSimple w:instr=\" PAGE \"><w:r>{HEADER_FOOTER_RPR}<w:t>1</w:t></w:r></w:fldSimple>\
+<w:r>{HEADER_FOOTER_RPR}<w:t xml:space=\"preserve\"> / </w:t></w:r>\
+<w:fldSimple w:instr=\" NUMPAGES \"><w:r>{HEADER_FOOTER_RPR}<w:t>1</w:t></w:r></w:fldSimple>"
+    )
+}
+
+/// 全ページ共通のヘッダー（PDFと同じく右寄せ）。指定がなければ `None`
+fn header_xml(doc: &Document) -> Option<String> {
+    let text = doc.settings.header_text.as_deref()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="right"/></w:pPr>{}</w:p></w:hdr>
+"#,
+        header_footer_text_run(text)
+    ))
+}
+
+/// 全ページ共通のフッター。PDFと同じ配置にする：
+/// フッター文字列とページ番号の両方 → 文字列を左・番号を右、番号だけ・文字列だけ → 中央。
+/// どちらもなければ `None`
+fn footer_xml(doc: &Document) -> Option<String> {
+    let s = &doc.settings;
+    let text = s
+        .footer_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let content = match (text, s.show_page_number) {
+        (Some(text), true) => {
+            // 右端のタブ位置 = 本文の幅（用紙幅 − 左右の余白）
+            let page_w = match s.orientation {
+                Orientation::Portrait => 11906,
+                Orientation::Landscape => 16838,
+            };
+            let width = page_w - 2 * length_to_twips(&s.margin, 1134);
+            format!(
+                "<w:pPr><w:tabs><w:tab w:val=\"right\" w:pos=\"{width}\"/></w:tabs></w:pPr>{}<w:r>{HEADER_FOOTER_RPR}<w:tab/></w:r>{}",
+                header_footer_text_run(text),
+                page_number_runs()
+            )
+        }
+        (Some(text), false) => format!(
+            "<w:pPr><w:jc w:val=\"center\"/></w:pPr>{}",
+            header_footer_text_run(text)
+        ),
+        (None, true) => format!(
+            "<w:pPr><w:jc w:val=\"center\"/></w:pPr>{}",
+            page_number_runs()
+        ),
+        (None, false) => return None,
+    };
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p>{content}</w:p></w:ftr>
+"#
+    ))
 }
 
 /// mm/cm/pt等の長さ文字列をtwips（1pt=20twips、1inch=1440twips）に概算変換する。
@@ -389,38 +496,42 @@ fn render_docx_block(
                 3 => 24,
                 _ => 22,
             };
-            let ind = indent_ind_attr(attrs, images.indent_twips);
-            out.push_str(&format!(
-                "    <w:p><w:pPr><w:outlineLvl w:val=\"{outline_lvl}\"/><w:spacing w:before=\"240\" w:after=\"120\"/>{ind}</w:pPr>"
-            ));
-            render_docx_runs(
-                out,
-                content,
+            let ppr = paragraph_properties(ParagraphProps {
+                // PDFの見出し（sticky）と同じく、見出しだけがページ末尾に取り残されないようにする
+                keep_next: true,
+                spacing: Some("<w:spacing w:before=\"240\" w:after=\"120\"/>"),
+                ind: indent_ind_attr(attrs, images.indent_twips),
+                align: attrs.align,
+                outline_level: Some(outline_lvl),
+            });
+            out.push_str(&format!("    <w:p>{ppr}"));
+            let base = block_run_style(
+                attrs,
                 RunStyle {
                     bold: true,
                     size_half_pt: Some(sz),
                     ..Default::default()
                 },
-                base_dir,
-                images,
             );
+            render_docx_runs(out, content, base, base_dir, images);
             out.push_str("</w:p>\n");
             *heading_index += 1;
         }
         Block::Paragraph { content, attrs } => {
-            let ind = indent_ind_attr(attrs, images.indent_twips);
             // `$$...$$` だけの段落は、PDFと同じく独立した数式として中央に置く
-            let jc = if is_display_math_only(content) {
-                "<w:jc w:val=\"center\"/>"
+            let align = if is_display_math_only(content) {
+                Some(Alignment::Center)
             } else {
-                ""
+                attrs.align
             };
-            if ind.is_empty() && jc.is_empty() {
-                out.push_str("    <w:p>");
-            } else {
-                out.push_str(&format!("    <w:p><w:pPr>{ind}{jc}</w:pPr>"));
-            }
-            render_docx_runs(out, content, RunStyle::default(), base_dir, images);
+            let ppr = paragraph_properties(ParagraphProps {
+                ind: indent_ind_attr(attrs, images.indent_twips),
+                align,
+                ..Default::default()
+            });
+            out.push_str(&format!("    <w:p>{ppr}"));
+            let base = block_run_style(attrs, RunStyle::default());
+            render_docx_runs(out, content, base, base_dir, images);
             out.push_str("</w:p>\n");
         }
         Block::List {
@@ -567,6 +678,54 @@ fn render_docx_block(
 
 /// `attrs` の `indent_left` / `indent_right` から `<w:ind .../>` 断片を生成する（指定がなければ空文字列）。
 /// `extra_left` は引用やリスト項目の中にいる分の左インデント（twip）で、`indent_left` に足し込む
+/// 段落の書式（`w:pPr`）の材料
+#[derive(Default)]
+struct ParagraphProps {
+    keep_next: bool,
+    spacing: Option<&'static str>,
+    ind: String,
+    align: Option<Alignment>,
+    outline_level: Option<u32>,
+}
+
+/// `w:pPr` を、OOXMLのスキーマが定める子要素の順序（keepNext → spacing → ind → jc → outlineLvl）で書く。
+/// 順序が違うと、Wordが「読み取れない内容」として修復を求めることがある。指定が何もなければ空文字列
+fn paragraph_properties(p: ParagraphProps) -> String {
+    let mut inner = String::new();
+    if p.keep_next {
+        inner.push_str("<w:keepNext/>");
+    }
+    if let Some(spacing) = p.spacing {
+        inner.push_str(spacing);
+    }
+    inner.push_str(&p.ind);
+    match p.align {
+        Some(Alignment::Center) => inner.push_str("<w:jc w:val=\"center\"/>"),
+        Some(Alignment::Right) => inner.push_str("<w:jc w:val=\"right\"/>"),
+        Some(Alignment::Left) => inner.push_str("<w:jc w:val=\"left\"/>"),
+        None => {}
+    }
+    if let Some(level) = p.outline_level {
+        inner.push_str(&format!("<w:outlineLvl w:val=\"{level}\"/>"));
+    }
+    if inner.is_empty() {
+        inner
+    } else {
+        format!("<w:pPr>{inner}</w:pPr>")
+    }
+}
+
+/// 段落・見出しの属性（`{color: ...}` / `{size: ...}`）を、その中の文字の既定の書式に反映する
+fn block_run_style(attrs: &crate::model::BlockAttributes, mut base: RunStyle) -> RunStyle {
+    if let Some(color) = &attrs.color {
+        base.color = Some(sanitize_hex(color));
+    }
+    if let Some(pt) = attrs.font_size.as_deref().and_then(parse_pt_size) {
+        base.size_half_pt = Some((pt * 2.0).round() as u32);
+    }
+    base
+}
+
 fn indent_ind_attr(attrs: &crate::model::BlockAttributes, extra_left: i64) -> String {
     let left = match attrs.indent_left.as_deref().map(|v| length_to_twips(v, 0)) {
         Some(l) => Some(l + extra_left),
@@ -600,10 +759,34 @@ fn render_docx_table_cell(
     base_dir: Option<&Path>,
     images: &mut DocxImageCollector,
 ) {
+    // セルの中身を丸ごと `[...]{bg: ...}` で囲んだ場合は、PDF/HTMLと同じくセル全体を塗る
+    // （文字の背景としてではなく、セルの網かけにする）
+    let whole_cell = cell.and_then(|c| match c.as_slice() {
+        [Inline::Styled { content, style }] if style.bg.is_some() => {
+            let mut rest = style.clone();
+            let bg = rest.bg.take();
+            let inner = if rest == InlineStyle::default() {
+                content.clone()
+            } else {
+                vec![Inline::Styled {
+                    content: content.clone(),
+                    style: rest,
+                }]
+            };
+            bg.map(|bg| (bg, inner))
+        }
+        _ => None,
+    });
+    let cell_fill = whole_cell.as_ref().map(|(bg, _)| bg.as_str()).or(header_bg);
+    let cell = whole_cell.as_ref().map(|(_, inner)| inner).or(cell);
+
+    // `w:tcPr` の子要素も順序が決まっている（shd → tcMar）
     out.push_str("        <w:tc><w:tcPr>");
-    if let Some(bg) = header_bg {
+    if let Some(bg) = cell_fill {
         let safe = sanitize_hex(bg);
-        out.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{safe}\"/>"));
+        out.push_str(&format!(
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{safe}\"/>"
+        ));
     }
     // Wordのセルは既定で上下の余白が0のため、背の高い数式画像などが罫線に接してしまう。
     // PDF/HTMLの表と同じく、指定がなくても少し（4pt）空ける
@@ -637,6 +820,8 @@ struct RunStyle {
     monospace: bool,
     color: Option<String>,
     size_half_pt: Option<u32>,
+    /// 文字の背景色（`[文字]{bg: ...}`。16進6桁）
+    bg: Option<String>,
 }
 
 enum RunItem {
@@ -654,6 +839,12 @@ fn render_docx_runs(
 ) {
     let mut items = Vec::new();
     collect_runs(inlines, base_style, base_dir, images, &mut items);
+    out.push_str(&runs_xml(items));
+}
+
+/// ランの並びをXMLにする
+fn runs_xml(items: Vec<RunItem>) -> String {
+    let mut out = String::new();
     for item in items {
         match item {
             RunItem::Break => out.push_str("<w:r><w:br/></w:r>"),
@@ -662,21 +853,21 @@ fn render_docx_runs(
                 if text.is_empty() {
                     continue;
                 }
+                // `w:rPr` の子要素はOOXMLのスキーマが定める順序で書く
+                // （rFonts → b → i → strike → color → sz → u → shd）。順序が違うと、
+                // Wordが「読み取れない内容」として修復を求めることがある
                 out.push_str("<w:r><w:rPr>");
+                if style.monospace {
+                    out.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/>");
+                }
                 if style.bold {
                     out.push_str("<w:b/>");
                 }
                 if style.italic {
                     out.push_str("<w:i/>");
                 }
-                if style.underline {
-                    out.push_str("<w:u w:val=\"single\"/>");
-                }
                 if style.strikethrough {
                     out.push_str("<w:strike/>");
-                }
-                if style.monospace {
-                    out.push_str("<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\"/>");
                 }
                 if let Some(color) = &style.color {
                     out.push_str(&format!("<w:color w:val=\"{}\"/>", sanitize_hex(color)));
@@ -684,12 +875,22 @@ fn render_docx_runs(
                 if let Some(sz) = style.size_half_pt {
                     out.push_str(&format!("<w:sz w:val=\"{sz}\"/>"));
                 }
+                if style.underline {
+                    out.push_str("<w:u w:val=\"single\"/>");
+                }
+                if let Some(bg) = &style.bg {
+                    out.push_str(&format!(
+                        "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+                        sanitize_hex(bg)
+                    ));
+                }
                 out.push_str("</w:rPr><w:t xml:space=\"preserve\">");
                 out.push_str(&xml_escape(&text));
                 out.push_str("</w:t></w:r>");
             }
         }
     }
+    out
 }
 
 fn collect_runs(
@@ -738,12 +939,22 @@ fn collect_runs(
                 apply_inline_style(&mut s, st);
                 collect_runs(content, s, base_dir, images, out);
             }
-            Inline::Link { text, url: _ } => {
-                // 実クリック可能なハイパーリンクは今回のv1では非対応のため、装飾のみ再現する
+            Inline::Link { text, url } => {
                 let mut s = style.clone();
                 s.underline = true;
                 s.color = Some("1A73E8".to_string());
-                collect_runs(text, s, base_dir, images, out);
+                let mut inner = Vec::new();
+                collect_runs(text, s, base_dir, images, &mut inner);
+                match images.register_link(url) {
+                    // Word本来のハイパーリンク（Ctrl+クリックで開く）。脚注の中でも使えるよう、
+                    // relationship の名前空間はこの要素に直接宣言する
+                    Some(rel_id) => out.push(RunItem::Drawing(format!(
+                        "<w:hyperlink xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"{rel_id}\" w:history=\"1\">{}</w:hyperlink>",
+                        runs_xml(inner)
+                    ))),
+                    // 文書内の見出しへのリンクは、見た目だけリンクにする
+                    None => out.extend(inner),
+                }
             }
             Inline::Image {
                 alt, url, width, ..
@@ -868,8 +1079,23 @@ fn apply_inline_style(target: &mut RunStyle, style: &InlineStyle) {
             target.size_half_pt = Some((pt * 2.0).round() as u32);
         }
     }
-    // 背景ハイライト（{bg:...}）はdocxの定型ハイライト色パレットに収まらないため、
-    // v1では反映を見送る（本文の可読性に影響しないテキスト色・下線等を優先）
+    // 背景色は定型の蛍光ペン（w:highlight）の色に収まらないため、任意の色を指定できる
+    // 網かけ（w:shd）で表す
+    if let Some(bg) = &style.bg {
+        target.bg = Some(sanitize_hex(bg));
+    }
+}
+
+fn link_relationships(links: &[(String, String)]) -> Vec<String> {
+    links
+        .iter()
+        .map(|(id, url)| {
+            format!(
+                r#"  <Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#,
+                xml_escape(url)
+            )
+        })
+        .collect()
 }
 
 fn parse_pt_size(raw: &str) -> Option<f64> {
@@ -912,7 +1138,24 @@ const ROOT_RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="
 </Relationships>
 "#;
 
-fn content_types_xml(images: &[EmbeddedImage], has_footnotes: bool) -> String {
+fn content_types_xml(
+    images: &[EmbeddedImage],
+    has_footnotes: bool,
+    header_footer: &HeaderFooter,
+) -> String {
+    let mut header_footer_overrides = String::new();
+    if header_footer.header.is_some() {
+        header_footer_overrides.push_str(
+            r#"
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>"#,
+        );
+    }
+    if header_footer.footer.is_some() {
+        header_footer_overrides.push_str(
+            r#"
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>"#,
+        );
+    }
     let mut extensions: Vec<&str> = Vec::new();
     for img in images {
         let ext = match img.content_type {
@@ -953,7 +1196,7 @@ fn content_types_xml(images: &[EmbeddedImage], has_footnotes: bool) -> String {
 {image_defaults}
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{footnote_overrides}
+  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{footnote_overrides}{header_footer_overrides}
 </Types>
 "#
     )
@@ -982,8 +1225,32 @@ fn wrap_relationships(relationships: Vec<String>) -> String {
     )
 }
 
-fn document_rels_xml(images: &[EmbeddedImage], has_footnotes: bool) -> String {
+/// 全ページ共通のヘッダー・フッターのパート（指定がなければ `None`）
+struct HeaderFooter {
+    header: Option<String>,
+    footer: Option<String>,
+}
+
+fn document_rels_xml(
+    images: &[EmbeddedImage],
+    links: &[(String, String)],
+    has_footnotes: bool,
+    header_footer: &HeaderFooter,
+) -> String {
     let mut relationships = image_relationships(images);
+    relationships.extend(link_relationships(links));
+    if header_footer.header.is_some() {
+        relationships.push(
+            r#"  <Relationship Id="rIdHeader1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#
+                .to_string(),
+        );
+    }
+    if header_footer.footer.is_some() {
+        relationships.push(
+            r#"  <Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>"#
+                .to_string(),
+        );
+    }
     relationships.push(
         r#"  <Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#
             .to_string(),
@@ -1075,6 +1342,7 @@ fn build_docx_zip(
     document_xml: &str,
     styles_xml: &str,
     collected: &DocxImageCollector,
+    header_footer: &HeaderFooter,
 ) -> Result<Vec<u8>, String> {
     let images = &collected.images;
     let has_footnotes = !collected.footnotes.is_empty();
@@ -1086,7 +1354,7 @@ fn build_docx_zip(
     let mut parts: Vec<(String, Vec<u8>)> = vec![
         (
             "[Content_Types].xml".to_string(),
-            content_types_xml(images, has_footnotes).into_bytes(),
+            content_types_xml(images, has_footnotes, header_footer).into_bytes(),
         ),
         ("_rels/.rels".to_string(), ROOT_RELS_XML.as_bytes().to_vec()),
         (
@@ -1103,9 +1371,15 @@ fn build_docx_zip(
         ),
         (
             "word/_rels/document.xml.rels".to_string(),
-            document_rels_xml(images, has_footnotes).into_bytes(),
+            document_rels_xml(images, &collected.links, has_footnotes, header_footer).into_bytes(),
         ),
     ];
+    if let Some(header) = &header_footer.header {
+        parts.push(("word/header1.xml".to_string(), header.as_bytes().to_vec()));
+    }
+    if let Some(footer) = &header_footer.footer {
+        parts.push(("word/footer1.xml".to_string(), footer.as_bytes().to_vec()));
+    }
     if has_footnotes {
         parts.push((
             "word/footnotes.xml".to_string(),
@@ -1114,7 +1388,13 @@ fn build_docx_zip(
         // 脚注の中の数式・画像も参照できるよう、本文と同じ画像の関連付けを持たせる
         parts.push((
             "word/_rels/footnotes.xml.rels".to_string(),
-            wrap_relationships(image_relationships(images)).into_bytes(),
+            wrap_relationships(
+                image_relationships(images)
+                    .into_iter()
+                    .chain(link_relationships(&collected.links))
+                    .collect(),
+            )
+            .into_bytes(),
         ));
         parts.push((
             "word/settings.xml".to_string(),
@@ -1297,7 +1577,8 @@ mod tests {
             - [ ] 未完了\n- [x] 完了\n\n\
             1. 手順\n\n   ```\n   cmd\n   ```\n   - 子\n2. 次\n\n\
             > 外\n>\n> > 内\n\n\
-            脚注つき[^a]の本文\n\n[^a]: 脚注の**中身** $x^2$\n";
+            脚注つき[^a]の本文 [背景]{bg: #ffeeaa}\n\n\
+            [^a]: 脚注の**中身** $x^2$ [参照](https://example.com/?a=1&b=\"2\")\n";
         let doc = parse_document(src);
         let bytes =
             generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
@@ -1315,6 +1596,8 @@ mod tests {
             "word/settings.xml",
             "word/_rels/document.xml.rels",
             "word/_rels/footnotes.xml.rels",
+            "word/header1.xml",
+            "word/footer1.xml",
         ] {
             let mut file = archive.by_name(part).unwrap();
             let mut contents = String::new();
@@ -1554,5 +1837,238 @@ mod structure_tests {
         let id: String = notes[pos + 9..].chars().take_while(|c| *c != '"').collect();
         let rels = part(src, "word/_rels/footnotes.xml.rels").unwrap();
         assert!(rels.contains(&format!("Id=\"{id}\"")), "{rels}");
+    }
+}
+
+#[cfg(test)]
+mod link_and_background_tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn part(src: &str, name: &str) -> String {
+        let doc = parse_document(src);
+        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut file = archive.by_name(name).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+        s
+    }
+
+    #[test]
+    fn external_links_become_clickable_hyperlinks() {
+        let src = "[公式](https://example.com/a?x=1&y=2) と [もう一度](https://example.com/a?x=1&y=2) と [別](mailto:a@example.com)\n";
+        let doc_xml = part(src, "word/document.xml");
+        let rels = part(src, "word/_rels/document.xml.rels");
+        // 同じリンク先は1つの関連付けを使い回す
+        assert_eq!(doc_xml.matches("r:id=\"rIdLink1\"").count(), 2, "{doc_xml}");
+        assert!(doc_xml.contains("r:id=\"rIdLink2\""));
+        assert!(rels.contains(
+            r#"Id="rIdLink1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a?x=1&amp;y=2" TargetMode="External""#
+        ), "{rels}");
+        assert!(rels.contains(r#"Target="mailto:a@example.com""#));
+        // 見た目（青・下線）はリンクの中のランに付く
+        assert!(doc_xml.contains("<w:hyperlink"));
+        assert!(doc_xml.contains("<w:color w:val=\"1A73E8\"/>"));
+    }
+
+    #[test]
+    fn heading_anchor_links_stay_styled_text() {
+        let doc_xml = part("[概要へ](#概要)\n", "word/document.xml");
+        assert!(!doc_xml.contains("<w:hyperlink"));
+        assert!(doc_xml.contains("概要へ"));
+        assert!(!part("[概要へ](#概要)\n", "word/_rels/document.xml.rels").contains("hyperlink"));
+    }
+
+    #[test]
+    fn inline_background_becomes_run_shading() {
+        let doc_xml = part("本文の[強調]{bg: #fff2cc}部分\n", "word/document.xml");
+        assert!(
+            doc_xml.contains("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFF2CC\"/></w:rPr><w:t xml:space=\"preserve\">強調"),
+            "{doc_xml}"
+        );
+    }
+
+    #[test]
+    fn whole_cell_background_fills_the_cell() {
+        let doc_xml = part(
+            "| A | B |\n| - | - |\n| [塗り]{bg: #fff2cc, red} | 普通 |\n",
+            "word/document.xml",
+        );
+        assert!(
+            doc_xml.contains("<w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFF2CC\"/>"),
+            "{doc_xml}"
+        );
+        // 文字の網かけとしては付けない（色指定は残る）
+        let cell_run = doc_xml.split("塗り").next().unwrap();
+        let last_rpr = cell_run.rsplit("<w:rPr>").next().unwrap();
+        assert!(!last_rpr.contains("w:shd"), "{last_rpr}");
+        assert!(
+            last_rpr.contains("<w:color w:val=\"C5221F\"/>"),
+            "{last_rpr}"
+        );
+    }
+
+    #[test]
+    fn run_properties_follow_the_schema_order() {
+        let doc_xml = part(
+            "***[全部]{color: red, size: 14pt, underline, bg: #eeeeee}*** ~~`x`~~\n",
+            "word/document.xml",
+        );
+        let rpr = doc_xml
+            .split("<w:rPr>")
+            .find(|s| s.contains("全部"))
+            .unwrap()
+            .split("</w:rPr>")
+            .next()
+            .unwrap();
+        let order = ["<w:b/>", "<w:i/>", "<w:color", "<w:sz", "<w:u ", "<w:shd"];
+        let positions: Vec<usize> = order.iter().map(|t| rpr.find(t).unwrap()).collect();
+        assert!(positions.windows(2).all(|w| w[0] < w[1]), "{rpr}");
+        let code = doc_xml
+            .split("<w:rPr>")
+            .find(|s| s.contains(">x<"))
+            .unwrap();
+        assert!(
+            code.find("<w:rFonts").unwrap() < code.find("<w:strike/>").unwrap(),
+            "{code}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod word_check_export {
+    /// `docs/word-check/sample.md` をWord・PDF・HTMLに書き出す（実機確認用）。
+    /// 普段のテストでは動かさない：
+    /// `$env:TYPER_EXPORT_DIR = "出力先"; cargo test word_check_export -- --ignored`
+    #[test]
+    #[ignore]
+    fn export_word_check_sample() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("TYPER_EXPORT_DIR").expect("set TYPER_EXPORT_DIR"),
+        );
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/word-check");
+        let src = std::fs::read_to_string(base.join("sample.md")).unwrap();
+        let doc = crate::parser::parse_document(&src);
+        assert!(crate::lint::lint_markdown(&src).is_empty());
+
+        let docx = super::generate_docx_bytes_with_base(&doc, Some(&base)).unwrap();
+        std::fs::write(out_dir.join("sample.docx"), docx).unwrap();
+        let html = crate::html_export::generate_html_with_base(&doc, Some(&base));
+        std::fs::write(out_dir.join("sample.html"), html).unwrap();
+        let code = crate::typst_gen::generate_typst_source_with_base(&doc, Some(&base));
+        let pdf = crate::typst_engine::TypstEngine::new()
+            .export_pdf(&code)
+            .unwrap();
+        std::fs::write(out_dir.join("sample.pdf"), pdf).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod paragraph_and_page_tests {
+    use super::*;
+    use crate::parser::parse_document;
+
+    fn part(src: &str, name: &str) -> Option<String> {
+        let doc = parse_document(src);
+        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation");
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut file = archive.by_name(name).ok()?;
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+        Some(s)
+    }
+
+    #[test]
+    fn paragraph_alignment_color_and_size_are_applied() {
+        let doc = part(
+            "{align: right}\n日付\n\n{align: center, size: 16pt, color: blue}\nタイトル\n",
+            "word/document.xml",
+        )
+        .unwrap();
+        assert!(
+            doc.contains("<w:p><w:pPr><w:jc w:val=\"right\"/></w:pPr>"),
+            "{doc}"
+        );
+        let title = doc.split("<w:p>").find(|p| p.contains("タイトル")).unwrap();
+        assert!(title.contains("<w:jc w:val=\"center\"/>"), "{title}");
+        assert!(title.contains("<w:color w:val=\"1A73E8\"/>"), "{title}");
+        assert!(title.contains("<w:sz w:val=\"32\"/>"), "{title}");
+    }
+
+    #[test]
+    fn heading_properties_follow_schema_order_and_keep_with_next() {
+        let doc = part(
+            "{align: center, color: red}\n## 見出し\n",
+            "word/document.xml",
+        )
+        .unwrap();
+        assert!(
+            doc.contains("<w:pPr><w:keepNext/><w:spacing w:before=\"240\" w:after=\"120\"/><w:jc w:val=\"center\"/><w:outlineLvl w:val=\"1\"/></w:pPr>"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("<w:b/><w:color w:val=\"C5221F\"/><w:sz w:val=\"28\"/>"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn page_margins_have_required_header_footer_and_gutter() {
+        let doc = part("本文\n", "word/document.xml").unwrap();
+        assert!(
+            doc.contains("w:left=\"1134\" w:header=\"567\" w:footer=\"567\" w:gutter=\"0\"/>"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn page_number_only_footer_is_centered_by_default() {
+        let footer = part("本文\n", "word/footer1.xml").unwrap();
+        assert!(footer.contains("<w:jc w:val=\"center\"/>"));
+        assert!(footer.contains("w:instr=\" PAGE \"") && footer.contains("w:instr=\" NUMPAGES \""));
+        assert!(part("本文\n", "word/header1.xml").is_none());
+        let rels = part("本文\n", "word/_rels/document.xml.rels").unwrap();
+        assert!(rels.contains("Target=\"footer1.xml\"") && !rels.contains("header1.xml"));
+        let types = part("本文\n", "[Content_Types].xml").unwrap();
+        assert!(types.contains("/word/footer1.xml") && !types.contains("/word/header1.xml"));
+    }
+
+    #[test]
+    fn header_and_footer_text_with_page_number() {
+        let src =
+            "---\nheader: {{会社名}} 資料\nfooter: 社外秘 & 限定\n会社名: サンプル\n---\n本文\n";
+        let header = part(src, "word/header1.xml").unwrap();
+        assert!(header.contains("<w:jc w:val=\"right\"/>"));
+        assert!(header.contains(">サンプル 資料<"), "{header}");
+        let footer = part(src, "word/footer1.xml").unwrap();
+        // 文字列は左、ページ番号は右端のタブ位置（A4縦・余白20mm → 本文幅 11906 − 2×1134 = 9638）
+        assert!(
+            footer.contains("<w:tab w:val=\"right\" w:pos=\"9638\"/>"),
+            "{footer}"
+        );
+        assert!(footer.contains(">社外秘 &amp; 限定<"), "{footer}");
+        assert!(footer.find("限定").unwrap() < footer.find("PAGE").unwrap());
+        let doc = part(src, "word/document.xml").unwrap();
+        assert!(doc.contains("<w:headerReference w:type=\"default\" r:id=\"rIdHeader1\"/>"));
+        assert!(doc.contains("<w:footerReference w:type=\"default\" r:id=\"rIdFooter1\"/>"));
+    }
+
+    #[test]
+    fn no_footer_part_when_page_numbers_are_off_and_no_footer_text() {
+        let src = "---\npage-number: off\n---\n本文\n";
+        assert!(part(src, "word/footer1.xml").is_none());
+        assert!(
+            !part(src, "word/document.xml")
+                .unwrap()
+                .contains("footerReference")
+        );
+        let with_text = part(
+            "---\npage-number: off\nfooter: 社外秘\n---\n本文\n",
+            "word/footer1.xml",
+        )
+        .unwrap();
+        assert!(with_text.contains("<w:jc w:val=\"center\"/>") && !with_text.contains("PAGE"));
     }
 }
