@@ -138,16 +138,32 @@ pub(crate) fn load_session() -> Option<(Vec<SessionTab>, usize)> {
         let tab = match (path, saved) {
             (Some(p), Some(text)) => {
                 if p.is_file() {
-                    SessionTab { current_file: Some(p), is_dirty, content: Some(text) }
+                    SessionTab {
+                        current_file: Some(p),
+                        is_dirty,
+                        content: Some(text),
+                    }
                 } else {
-                    SessionTab { current_file: None, is_dirty: true, content: Some(text) }
+                    SessionTab {
+                        current_file: None,
+                        is_dirty: true,
+                        content: Some(text),
+                    }
                 }
             }
             (Some(p), None) => match std::fs::read_to_string(&p) {
-                Ok(text) => SessionTab { current_file: Some(p), is_dirty: false, content: Some(text) },
+                Ok(text) => SessionTab {
+                    current_file: Some(p),
+                    is_dirty: false,
+                    content: Some(text),
+                },
                 Err(_) => continue,
             },
-            (None, Some(text)) => SessionTab { current_file: None, is_dirty, content: Some(text) },
+            (None, Some(text)) => SessionTab {
+                current_file: None,
+                is_dirty,
+                content: Some(text),
+            },
             (None, None) => continue,
         };
         if i == saved_active {

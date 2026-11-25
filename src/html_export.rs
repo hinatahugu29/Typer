@@ -41,13 +41,7 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
     let toc_entries = collect_toc_entries(&doc.blocks);
     let mut heading_counter = 0usize;
     for block in &doc.blocks {
-        render_html_block(
-            &mut body,
-            block,
-            ctx,
-            &toc_entries,
-            &mut heading_counter,
-        );
+        render_html_block(&mut body, block, ctx, &toc_entries, &mut heading_counter);
     }
     render_footnote_section(&mut body, &footnotes.borrow());
 
@@ -333,7 +327,10 @@ pub fn generate_html_with_base(doc: &Document, base_dir: Option<&Path>) -> Strin
 fn render_watermark(text: Option<&str>) -> String {
     match text {
         Some(t) if !t.trim().is_empty() => {
-            format!("<div class=\"doc-watermark\">{}</div>\n", html_escape(t.trim()))
+            format!(
+                "<div class=\"doc-watermark\">{}</div>\n",
+                html_escape(t.trim())
+            )
         }
         _ => String::new(),
     }
@@ -675,11 +672,15 @@ fn render_html_table_cell(
                 }]
             };
             let bg_css = format!("background-color: {}", sanitize_color_hex(bg));
-            let css = [Some(bg_css.as_str()), cell_align_css(align), row_padding_css]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("; ");
+            let css = [
+                Some(bg_css.as_str()),
+                cell_align_css(align),
+                row_padding_css,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
             let _ = write!(out, "      <td style=\"{css}\">");
             render_html_inlines(out, &cell_content, ctx);
             out.push_str("</td>\n");
@@ -705,7 +706,10 @@ fn render_html_math(out: &mut String, tex: &str, display: bool, ctx: Ctx<'_>) {
         let _ = write!(out, r#"<span class="{class}">{alt}</span>"#);
         return;
     };
-    let src = format!("data:image/svg+xml;base64,{}", encode_base64(math.svg.as_bytes()));
+    let src = format!(
+        "data:image/svg+xml;base64,{}",
+        encode_base64(math.svg.as_bytes())
+    );
     // 本文の文字サイズで組んだ画像を、周りの文字に対する比率（em）で置く。
     // こうすると見出しなど文字の大きい箇所では、数式も同じ比率で大きくなる
     let base_pt = parse_pt(&ctx.settings.font_size).unwrap_or(10.5);
@@ -730,7 +734,12 @@ fn render_html_math(out: &mut String, tex: &str, display: bool, ctx: Ctx<'_>) {
 }
 
 fn parse_pt(raw: &str) -> Option<f64> {
-    raw.trim().strip_suffix("pt")?.trim().parse().ok().filter(|v: &f64| *v > 0.0)
+    raw.trim()
+        .strip_suffix("pt")?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|v: &f64| *v > 0.0)
 }
 
 fn render_html_inlines(out: &mut String, inlines: &[Inline], ctx: Ctx<'_>) {
@@ -981,12 +990,13 @@ mod tests {
         let html = generate_html(&parse_document(
             "文中 $a < b$ の式\n\n$$\n\\frac{1}{2}\n$$\n",
         ));
-        assert!(html.contains(
-            r#"<img class="math-img" src="data:image/svg+xml;base64,"#
-        ));
+        assert!(html.contains(r#"<img class="math-img" src="data:image/svg+xml;base64,"#));
         // 画像の代替テキストに元の記法を残す（読み上げ・検索用）
         assert!(html.contains(r#"alt="$a &lt; b$""#));
-        assert!(html.contains("vertical-align: -"), "inline math must sit on the baseline");
+        assert!(
+            html.contains("vertical-align: -"),
+            "inline math must sit on the baseline"
+        );
         assert!(html.contains(r#"<span class="math-display"><img class="math-img""#));
         assert!(html.contains(r#"alt="$$\frac{1}{2}$$""#));
         assert!(!html.contains("<div class=\"math"));
@@ -997,7 +1007,9 @@ mod tests {
         let mut doc = parse_document("本文\n");
         doc.settings.font_choice = crate::model::FontChoice::Custom(String::new());
         let html = generate_html(&doc);
-        assert!(html.contains(r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#));
+        assert!(
+            html.contains(r#""BIZ UDPGothic", "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif"#)
+        );
     }
 
     #[test]
@@ -1104,10 +1116,14 @@ mod tests {
         let doc = parse_document("{row-padding: 14pt}\n| A |\n| :--- |\n| 1 |\n");
         let html = generate_html(&doc);
         assert!(
-            html.contains("<th style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">")
+            html.contains(
+                "<th style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">"
+            )
         );
         assert!(
-            html.contains("<td style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">")
+            html.contains(
+                "<td style=\"text-align: left; padding-top: 14pt; padding-bottom: 14pt\">"
+            )
         );
     }
 
@@ -1211,7 +1227,10 @@ mod structure_tests {
     #[test]
     fn loose_list_items_have_text_and_no_stray_paragraphs() {
         let out = html("- a\n\n- b\n");
-        assert!(out.contains("<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>"), "{out}");
+        assert!(
+            out.contains("<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>"),
+            "{out}"
+        );
         assert!(!out.contains("<p>a</p>"));
     }
 
@@ -1228,14 +1247,19 @@ mod structure_tests {
     #[test]
     fn custom_start_nested_list() {
         let out = html("3. a\n   - x\n4. b\n");
-        assert!(out.contains("<ol start=\"3\">\n  <li>a\n<ul>\n  <li>x</li>\n</ul>\n</li>"), "{out}");
+        assert!(
+            out.contains("<ol start=\"3\">\n  <li>a\n<ul>\n  <li>x</li>\n</ul>\n</li>"),
+            "{out}"
+        );
     }
 
     #[test]
     fn nested_blockquote() {
         let out = html("> 外\n>\n> > 内\n");
         assert!(
-            out.contains("<blockquote>\n<p>外</p>\n<blockquote>\n<p>内</p>\n</blockquote>\n</blockquote>"),
+            out.contains(
+                "<blockquote>\n<p>外</p>\n<blockquote>\n<p>内</p>\n</blockquote>\n</blockquote>"
+            ),
             "{out}"
         );
     }
@@ -1243,23 +1267,39 @@ mod structure_tests {
     #[test]
     fn quote_inside_columns() {
         let out = html(":::columns 2\n\n> 引用\n\n:::columns-end\n");
-        assert!(out.contains("column-count: 2; column-gap: 2rem;\">\n<blockquote>"), "{out}");
+        assert!(
+            out.contains("column-count: 2; column-gap: 2rem;\">\n<blockquote>"),
+            "{out}"
+        );
     }
 
     #[test]
     fn task_items_render_disabled_checkboxes() {
         let out = html("- [ ] 未\n- [x] 済\n");
-        assert!(out.contains("<li class=\"task-item\"><input type=\"checkbox\" disabled> 未</li>"), "{out}");
-        assert!(out.contains("<li class=\"task-item\"><input type=\"checkbox\" disabled checked> 済</li>"));
+        assert!(
+            out.contains("<li class=\"task-item\"><input type=\"checkbox\" disabled> 未</li>"),
+            "{out}"
+        );
+        assert!(out.contains(
+            "<li class=\"task-item\"><input type=\"checkbox\" disabled checked> 済</li>"
+        ));
     }
 
     #[test]
     fn footnotes_are_numbered_and_listed_at_end_with_links() {
         let out = html("一[^a]、二[^b]、再び[^a]\n\n[^a]: 注A\n\n[^b]: 注*B*\n");
-        assert!(out.contains("一<sup class=\"footnote-ref\"><a href=\"#fn1\" id=\"fnref1\">1</a></sup>"), "{out}");
+        assert!(
+            out.contains(
+                "一<sup class=\"footnote-ref\"><a href=\"#fn1\" id=\"fnref1\">1</a></sup>"
+            ),
+            "{out}"
+        );
         assert!(out.contains("<a href=\"#fn2\" id=\"fnref2\">2</a>"));
         // 同じ脚注への2回目の参照は、新しい注を作らず1番を指す（idは重複させない）
-        assert!(out.contains("再び<sup class=\"footnote-ref\"><a href=\"#fn1\">1</a></sup>"), "{out}");
+        assert!(
+            out.contains("再び<sup class=\"footnote-ref\"><a href=\"#fn1\">1</a></sup>"),
+            "{out}"
+        );
         assert!(!out.contains("fn3"));
         assert_eq!(out.matches("id=\"fnref1\"").count(), 1);
         assert!(out.contains("<li id=\"fn1\" value=\"1\">注A <a href=\"#fnref1\""));
@@ -1276,7 +1316,13 @@ mod structure_tests {
     #[test]
     fn heading_inside_list_keeps_toc_ids_aligned() {
         let out = html(":::toc\n\n- 項目\n\n  ## 項目内の見出し\n\n## 後の見出し\n");
-        assert!(out.contains("<h2 id=\"toc-heading-0\">項目内の見出し</h2>"), "{out}");
-        assert!(out.contains("<h2 id=\"toc-heading-1\">後の見出し</h2>"), "{out}");
+        assert!(
+            out.contains("<h2 id=\"toc-heading-0\">項目内の見出し</h2>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<h2 id=\"toc-heading-1\">後の見出し</h2>"),
+            "{out}"
+        );
     }
 }

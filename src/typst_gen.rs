@@ -4,8 +4,8 @@
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, ListItem,
-    InlineStyle, Orientation,
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
+    ListItem, Orientation,
 };
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -123,7 +123,11 @@ pub fn generate_typst_source_with_map(
 
     // PDFの文書タイトル（ビューアーのタイトルバー・プロパティに出る）
     if let Some(title) = crate::parser::document_title(doc) {
-        let _ = writeln!(out, "#set document(title: \"{}\")", escape_typst_string(&title));
+        let _ = writeln!(
+            out,
+            "#set document(title: \"{}\")",
+            escape_typst_string(&title)
+        );
     }
 
     // ページ・基本組版設定プリアンブル
@@ -240,8 +244,7 @@ fn font_list_for(s: &DocumentSettings) -> String {
             r#""BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic""#.to_string()
         }
         FontChoice::Mincho => {
-            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#
-                .to_string()
+            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#.to_string()
         }
         FontChoice::Custom(name) => {
             let safe_name = sanitize_typst_string_literal(name);
@@ -727,7 +730,9 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                 content,
                 repeat: false,
             } => {
-                out.push_str("#context if not state(\"typer-in-outline\", false).get() [#footnote[");
+                out.push_str(
+                    "#context if not state(\"typer-in-outline\", false).get() [#footnote[",
+                );
                 render_inlines(out, content, base_dir);
                 let _ = write!(
                     out,
@@ -1294,7 +1299,10 @@ mod tests {
     fn test_ordered_list_default_start_uses_enum_function_form() {
         let doc = parse_document("1. 一番目\n2. 二番目\n");
         let code = generate_typst_source(&doc);
-        assert!(code.contains("#enum(start: 1, \n  [一番目], \n  [二番目]\n)"), "{code}");
+        assert!(
+            code.contains("#enum(start: 1, \n  [一番目], \n  [二番目]\n)"),
+            "{code}"
+        );
     }
 
     #[test]
@@ -1328,7 +1336,10 @@ mod structure_tests {
         let (code, map) = generate_typst_source_with_map(&parse_document(src), None);
         assert!(!code.contains(LINE_MARK_START) && !code.contains(LINE_MARK_END));
         let line_of = |needle: &str| {
-            code.lines().position(|l| l.contains(needle)).map(|i| i + 1).unwrap()
+            code.lines()
+                .position(|l| l.contains(needle))
+                .map(|i| i + 1)
+                .unwrap()
         };
         assert_eq!(map.source_line_for(line_of("= 見出し")), Some(4));
         assert_eq!(map.source_line_for(line_of("[3], [4]")), Some(9));
@@ -1383,7 +1394,10 @@ mod structure_tests {
     #[test]
     fn code_block_and_paragraph_go_inside_item() {
         let out = body("1. 手順\n\n   続き\n\n   ```\n   cmd\n   ```\n2. 次\n");
-        assert!(out.starts_with("#enum(start: 1, \n  [手順\n\n続き\n\n#block("), "{out}");
+        assert!(
+            out.starts_with("#enum(start: 1, \n  [手順\n\n続き\n\n#block("),
+            "{out}"
+        );
         assert!(out.contains("```\ncmd\n```]], \n  [次]\n)"), "{out}");
     }
 
@@ -1398,13 +1412,19 @@ mod structure_tests {
     #[test]
     fn custom_start_with_nested_list_is_well_formed() {
         let out = body("3. a\n   - x\n4. b\n");
-        assert_eq!(out, "#enum(start: 3, \n  [a\n\n#list(\n  [x]\n)], \n  [b]\n)");
+        assert_eq!(
+            out,
+            "#enum(start: 3, \n  [a\n\n#list(\n  [x]\n)], \n  [b]\n)"
+        );
     }
 
     #[test]
     fn task_list_hides_bullets_and_draws_boxes() {
         let out = body("- [ ] 未\n- [x] 済\n");
-        assert!(out.starts_with("#list(marker: [], body-indent: 0pt, \n  [#box("), "{out}");
+        assert!(
+            out.starts_with("#list(marker: [], body-indent: 0pt, \n  [#box("),
+            "{out}"
+        );
         assert!(out.contains(&format!("[{TASK_BOX_UNCHECKED} 未]")));
         assert!(out.contains(&format!("[{TASK_BOX_CHECKED} 済]")));
     }
@@ -1439,7 +1459,11 @@ mod structure_tests {
     #[test]
     fn nested_quote_renders_quote_inside_quote() {
         let out = body("> 外\n>\n> > 内\n");
-        assert_eq!(out.matches("#block(width: 100%, fill: rgb(\"#f8f9fa\")").count(), 2);
+        assert_eq!(
+            out.matches("#block(width: 100%, fill: rgb(\"#f8f9fa\")")
+                .count(),
+            2
+        );
         assert!(out.contains("[外\n\n#block("), "{out}");
         assert!(out.contains("[内]]"), "{out}");
     }
@@ -1447,7 +1471,10 @@ mod structure_tests {
     #[test]
     fn quote_inside_columns_renders_inside_columns() {
         let out = body(":::columns 2\n\n> 引用\n\n本文\n\n:::columns-end\n");
-        assert!(out.starts_with("#columns(2, gutter: 18pt)[\n#block("), "{out}");
+        assert!(
+            out.starts_with("#columns(2, gutter: 18pt)[\n#block("),
+            "{out}"
+        );
     }
 
     #[test]

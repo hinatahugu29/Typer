@@ -147,7 +147,17 @@ const BINARY: &[(&str, &str)] = &[
 
 /// 後ろの区切り記号だけを残して読み捨てるサイズ指定コマンド
 const SIZING: &[&str] = &[
-    "left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr", "displaystyle",
+    "left",
+    "right",
+    "big",
+    "Big",
+    "bigg",
+    "Bigg",
+    "bigl",
+    "bigr",
+    "Bigl",
+    "Bigr",
+    "displaystyle",
     "textstyle",
 ];
 
@@ -316,7 +326,11 @@ impl Converter {
                 let index = self.sequence(Some(']'));
                 self.call_depth -= 1;
                 let radicand = self.call_argument();
-                let index = if index.trim().is_empty() { "\"\"".to_string() } else { index };
+                let index = if index.trim().is_empty() {
+                    "\"\"".to_string()
+                } else {
+                    index
+                };
                 return format!("root({index}, {radicand})");
             }
         }
@@ -329,7 +343,10 @@ impl Converter {
             let b = self.call_argument();
             return format!("{typst}({a}, {b})");
         }
-        if matches!(name.as_str(), "text" | "textrm" | "mbox" | "mathrm" | "operatorname") {
+        if matches!(
+            name.as_str(),
+            "text" | "textrm" | "mbox" | "mathrm" | "operatorname"
+        ) {
             let raw = self.raw_group();
             return if name == "operatorname" {
                 format!("op({})", quote(&raw))

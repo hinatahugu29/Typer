@@ -23,10 +23,12 @@ use crate::parser::{
 };
 use crate::templates::TEMPLATES;
 use crate::typst_engine::{
-    CompileError, DescribedError, HeadingPosition, PreviewOutput, TypstEngine, available_font_families,
-    available_latin_font_families,
+    CompileError, DescribedError, HeadingPosition, PreviewOutput, TypstEngine,
+    available_font_families, available_latin_font_families,
 };
-use crate::typst_gen::{SourceLineMap, generate_typst_source_with_base, generate_typst_source_with_map};
+use crate::typst_gen::{
+    SourceLineMap, generate_typst_source_with_base, generate_typst_source_with_map,
+};
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
 use crate::ui_persistence::{
@@ -35,8 +37,8 @@ use crate::ui_persistence::{
     save_session, setup_japanese_fonts, setup_visual_theme,
 };
 use crate::ui_text::{
-    byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown, line_char_range,
-    is_valid_hex_color,
+    byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
+    is_valid_hex_color, line_char_range,
 };
 
 /// フォント名の入力欄と、入力中の文字で絞り込んだ候補ポップアップを描画する。値が変わったら `true`。
@@ -404,7 +406,9 @@ impl TyperApp {
             })
             .collect();
         self.active_tab = active;
-        let snapshot = self.tabs[active].take().expect("復元直後のスロットは必ずSome");
+        let snapshot = self.tabs[active]
+            .take()
+            .expect("復元直後のスロットは必ずSome");
         self.load_tab_snapshot(snapshot);
         self.status_message = format!("前回のタブを復元しました（{count}件）");
     }
@@ -1627,7 +1631,11 @@ impl TyperApp {
                         self.replace_all_matches();
                     }
 
-                    if ui.small_button("✖").on_hover_text("検索バーを閉じる").clicked() {
+                    if ui
+                        .small_button("✖")
+                        .on_hover_text("検索バーを閉じる")
+                        .clicked()
+                    {
                         self.show_find_replace = false;
                     }
                 });
@@ -1787,8 +1795,7 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
             self.preview_maximized = !self.preview_maximized;
         }
-        if self.preview_maximized
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        if self.preview_maximized && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.preview_maximized = false;
         }
@@ -2076,108 +2083,107 @@ impl eframe::App for TyperApp {
                 .size_range(320.0..=1200.0)
         };
         preview_panel.show(ui, |ui| {
-                self.draw_message_panel(ui);
+            self.draw_message_panel(ui);
 
-                if self.show_typst_source {
-                    egui::Panel::bottom("typst_source_inspector")
-                        .resizable(true)
-                        .default_size(180.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("生成されたTypst組版コード (自動変換)").strong(),
-                                );
-                                if ui
-                                    .small_button("📋 コピー")
-                                    .on_hover_text(
-                                        "生成されたTypstコードをクリップボードにコピーします",
-                                    )
-                                    .clicked()
-                                {
-                                    ui.ctx().copy_text(self.last_typst_code.clone());
-                                    self.status_message =
-                                        "Typstコードをクリップボードにコピーしました".to_string();
-                                }
-                            });
-                            egui::ScrollArea::vertical()
-                                .id_salt("typst_code_scroll")
-                                .show(ui, |ui| {
-                                    let mut code_view = self.last_typst_code.as_str();
-                                    ui.add(
-                                        TextEdit::multiline(&mut code_view)
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY),
-                                    );
-                                });
-                        });
-                }
-
-                egui::Frame::NONE
-                    .fill(Color32::from_rgb(228, 231, 235))
-                    .inner_margin(16.0)
+            if self.show_typst_source {
+                egui::Panel::bottom("typst_source_inspector")
+                    .resizable(true)
+                    .default_size(180.0)
                     .show(ui, |ui| {
-                        egui::ScrollArea::both()
-                            .id_salt("page_preview_scroll")
-                            .auto_shrink([false, false])
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("生成されたTypst組版コード (自動変換)").strong(),
+                            );
+                            if ui
+                                .small_button("📋 コピー")
+                                .on_hover_text(
+                                    "生成されたTypstコードをクリップボードにコピーします",
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(self.last_typst_code.clone());
+                                self.status_message =
+                                    "Typstコードをクリップボードにコピーしました".to_string();
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("typst_code_scroll")
                             .show(ui, |ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 20.0;
-
-                                    for (idx, (tex, base_size)) in
-                                        self.page_textures.iter().enumerate()
-                                    {
-                                        let display_size = *base_size * self.zoom * 0.85;
-
-                                        let (rect, _) =
-                                            ui.allocate_exact_size(display_size, Sense::hover());
-                                        if let Some((page, y_pt)) = self.pending_preview_jump
-                                            && page == idx
-                                        {
-                                            // base_size はpt単位なので、表示倍率を掛ければ画面上の位置になる
-                                            let y = rect.top() + y_pt * self.zoom * 0.85;
-                                            let target = egui::Rect::from_min_max(
-                                                egui::pos2(rect.left(), y - 12.0),
-                                                egui::pos2(rect.right(), y),
-                                            );
-                                            ui.scroll_to_rect(target, Some(egui::Align::Min));
-                                            self.pending_preview_jump = None;
-                                        }
-                                        let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
-                                        ui.painter().rect_filled(
-                                            shadow_rect,
-                                            2.0,
-                                            Color32::from_black_alpha(38),
-                                        );
-                                        ui.painter().image(
-                                            tex.id(),
-                                            rect,
-                                            egui::Rect::from_min_max(
-                                                egui::pos2(0.0, 0.0),
-                                                egui::pos2(1.0, 1.0),
-                                            ),
-                                            Color32::WHITE,
-                                        );
-                                        ui.painter().rect_stroke(
-                                            rect,
-                                            0.0,
-                                            Stroke::new(1.0, Color32::from_rgb(189, 193, 198)),
-                                            egui::StrokeKind::Outside,
-                                        );
-
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "- {} / {} -",
-                                                idx + 1,
-                                                self.page_textures.len()
-                                            ))
-                                            .small()
-                                            .weak(),
-                                        );
-                                    }
-                                });
+                                let mut code_view = self.last_typst_code.as_str();
+                                ui.add(
+                                    TextEdit::multiline(&mut code_view)
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY),
+                                );
                             });
                     });
-            });
+            }
+
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(228, 231, 235))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("page_preview_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.spacing_mut().item_spacing.y = 20.0;
+
+                                for (idx, (tex, base_size)) in self.page_textures.iter().enumerate()
+                                {
+                                    let display_size = *base_size * self.zoom * 0.85;
+
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(display_size, Sense::hover());
+                                    if let Some((page, y_pt)) = self.pending_preview_jump
+                                        && page == idx
+                                    {
+                                        // base_size はpt単位なので、表示倍率を掛ければ画面上の位置になる
+                                        let y = rect.top() + y_pt * self.zoom * 0.85;
+                                        let target = egui::Rect::from_min_max(
+                                            egui::pos2(rect.left(), y - 12.0),
+                                            egui::pos2(rect.right(), y),
+                                        );
+                                        ui.scroll_to_rect(target, Some(egui::Align::Min));
+                                        self.pending_preview_jump = None;
+                                    }
+                                    let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
+                                    ui.painter().rect_filled(
+                                        shadow_rect,
+                                        2.0,
+                                        Color32::from_black_alpha(38),
+                                    );
+                                    ui.painter().image(
+                                        tex.id(),
+                                        rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        Color32::WHITE,
+                                    );
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        0.0,
+                                        Stroke::new(1.0, Color32::from_rgb(189, 193, 198)),
+                                        egui::StrokeKind::Outside,
+                                    );
+
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "- {} / {} -",
+                                            idx + 1,
+                                            self.page_textures.len()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                }
+                            });
+                        });
+                });
+        });
 
         if self.preview_maximized {
             return;
@@ -2927,25 +2933,39 @@ mod tests {
     }
 
     fn heading(text: &str, page: usize, y_pt: f32) -> HeadingPosition {
-        HeadingPosition { text: text.to_string(), page, y_pt }
+        HeadingPosition {
+            text: text.to_string(),
+            page,
+            y_pt,
+        }
     }
 
     #[test]
     fn test_find_preview_heading_matches_text_ignoring_markup() {
         let hs = vec![heading("概要", 0, 50.0), heading("太字の見出し", 1, 80.0)];
-        assert_eq!(find_preview_heading(&hs, 1, "**太字**の見出し", 0), Some((1, 80.0)));
+        assert_eq!(
+            find_preview_heading(&hs, 1, "**太字**の見出し", 0),
+            Some((1, 80.0))
+        );
     }
 
     #[test]
     fn test_find_preview_heading_picks_nth_duplicate() {
-        let hs = vec![heading("まとめ", 0, 10.0), heading("本文", 0, 40.0), heading("まとめ", 2, 30.0)];
+        let hs = vec![
+            heading("まとめ", 0, 10.0),
+            heading("本文", 0, 40.0),
+            heading("まとめ", 2, 30.0),
+        ];
         assert_eq!(find_preview_heading(&hs, 2, "まとめ", 1), Some((2, 30.0)));
     }
 
     #[test]
     fn test_find_preview_heading_falls_back_to_order() {
         let hs = vec![heading("A", 0, 10.0), heading("B", 1, 20.0)];
-        assert_eq!(find_preview_heading(&hs, 1, "一致しない", 0), Some((1, 20.0)));
+        assert_eq!(
+            find_preview_heading(&hs, 1, "一致しない", 0),
+            Some((1, 20.0))
+        );
         assert_eq!(find_preview_heading(&hs, 5, "一致しない", 0), None);
     }
 

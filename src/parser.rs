@@ -9,8 +9,8 @@
 //! 4. インライン装飾 (`[重要]{red}`, `[テキスト]{color: red, size: 12pt}`, `{color:red|重要}`)
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline,
-    InlineStyle, ListItem, Orientation,
+    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, InlineStyle,
+    ListItem, Orientation,
 };
 use pulldown_cmark::{Alignment as CmarkAlign, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::fmt::Write;
@@ -49,7 +49,8 @@ pub fn parse_document(input: &str) -> Document {
     // （タイトル自体の `{{会社名}}` を置き換えた後の値を差し込む）
     let mut vars = settings.custom_vars.clone();
     if let Some(title) = &settings.title {
-        vars.entry("title".to_string()).or_insert_with(|| title.clone());
+        vars.entry("title".to_string())
+            .or_insert_with(|| title.clone());
     }
     let substituted = substitute_custom_vars(body, &vars);
     let (preprocessed, line_map) = preprocess_block_directives(&substituted);
@@ -997,7 +998,8 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                     // 強制的に差し替わってしまう。明朝側の "mincho" / "明朝" も同様）
                     if v_low == "mincho" || val == "明朝" || val == "明朝体" {
                         settings.font_choice = FontChoice::Mincho;
-                    } else if v_low == "gothic" || val == "ゴシック" || val == "ゴシック体" {
+                    } else if v_low == "gothic" || val == "ゴシック" || val == "ゴシック体"
+                    {
                         settings.font_choice = FontChoice::Gothic;
                     } else {
                         // 空文字列もここに含める：カスタム入力欄を全消去して打ち直している途中の
@@ -1033,8 +1035,7 @@ fn extract_frontmatter(input: &str) -> (DocumentSettings, &str) {
                 }
                 "watermark" => {
                     let v_low = val.to_ascii_lowercase();
-                    if val.is_empty() || matches!(v_low.as_str(), "off" | "false" | "no" | "none")
-                    {
+                    if val.is_empty() || matches!(v_low.as_str(), "off" | "false" | "no" | "none") {
                         settings.watermark = None;
                     } else {
                         settings.watermark = Some(val.to_string());
@@ -1162,7 +1163,8 @@ fn preprocess_block_directives(body: &str) -> (String, Vec<usize>) {
         }
 
         if let Some(count) = parse_columns_start_directive(trimmed) {
-            let marker = format!("{COLUMNS_START_MARKER_PREFIX}{count}{COLUMNS_START_MARKER_SUFFIX}");
+            let marker =
+                format!("{COLUMNS_START_MARKER_PREFIX}{count}{COLUMNS_START_MARKER_SUFFIX}");
             push_marker(&mut out, &mut line_map, &marker, src);
             continue;
         }
@@ -1508,7 +1510,10 @@ fn restore_atoms(inlines: Vec<Inline>, atoms: &mut [Option<Inline>]) -> Vec<Inli
             Inline::Text(text) => {
                 let mut plain = String::new();
                 for c in text.chars() {
-                    match atom_index(c).and_then(|i| atoms.get_mut(i)).and_then(Option::take) {
+                    match atom_index(c)
+                        .and_then(|i| atoms.get_mut(i))
+                        .and_then(Option::take)
+                    {
                         Some(atom) => {
                             if !plain.is_empty() {
                                 out.push(Inline::Text(std::mem::take(&mut plain)));
@@ -1847,7 +1852,11 @@ mod tests {
                 _ => None,
             })
             .expect("親1の子として入れ子リストが見つかるはず");
-        assert_eq!(child_list.len(), 2, "入れ子リストの項目は2つ（子1-1, 子1-2）のはず");
+        assert_eq!(
+            child_list.len(),
+            2,
+            "入れ子リストの項目は2つ（子1-1, 子1-2）のはず"
+        );
         assert!(list[1].children.is_empty(), "親2には子リストがない");
     }
 
@@ -1901,9 +1910,9 @@ mod tests {
             display: false
         }));
         let display = first_paragraph("$$\n\\frac{1}{2}\n$$\n");
-        assert!(display
-            .iter()
-            .any(|i| matches!(i, Inline::Math { display: true, tex } if tex.contains(r"\frac{1}{2}"))));
+        assert!(display.iter().any(
+            |i| matches!(i, Inline::Math { display: true, tex } if tex.contains(r"\frac{1}{2}"))
+        ));
     }
 
     #[test]
@@ -1940,7 +1949,11 @@ mod tests {
 
     #[test]
     fn test_money_amounts_are_not_treated_as_math() {
-        for src in ["価格は $100 と $200 です", "価格は$100と$200です", "$5 and $10"] {
+        for src in [
+            "価格は $100 と $200 です",
+            "価格は$100と$200です",
+            "$5 and $10",
+        ] {
             let content = parse_document(src).blocks;
             let has_math = format!("{content:?}").contains("Math");
             assert!(!has_math, "{src:?} should stay plain text: {content:?}");
@@ -1952,7 +1965,10 @@ mod tests {
         let with_title = parse_document("---\ntitle: 月次報告\n---\n\n# 見出し\n");
         assert_eq!(document_title(&with_title).as_deref(), Some("月次報告"));
         let heading_only = parse_document("本文\n\n## 最初の **見出し**\n\n# 次\n");
-        assert_eq!(document_title(&heading_only).as_deref(), Some("最初の 見出し"));
+        assert_eq!(
+            document_title(&heading_only).as_deref(),
+            Some("最初の 見出し")
+        );
         assert_eq!(document_title(&parse_document("本文だけ\n")), None);
     }
 
@@ -1961,7 +1977,10 @@ mod tests {
         let src = "---\ntitle:\nfont: gothic\n---\n\n# 実践ガイド\n";
         let doc = parse_document(src);
         assert_eq!(doc.settings.title, None);
-        assert!(doc.settings.custom_vars.is_empty(), "empty title must not become a variable");
+        assert!(
+            doc.settings.custom_vars.is_empty(),
+            "empty title must not become a variable"
+        );
         assert_eq!(document_title(&doc).as_deref(), Some("実践ガイド"));
         // 書き戻しでも空の title: 行が先頭に1つだけ残る
         let rewritten = update_document_settings_in_markdown(src, &parse_settings(src));
@@ -1977,7 +1996,10 @@ mod tests {
         let doc = parse_document(
             "---\n会社名: 株式会社サンプル\ntitle: {{会社名}} 月次報告\n---\n\n件名: {{title}}\n",
         );
-        assert_eq!(doc.settings.title.as_deref(), Some("株式会社サンプル 月次報告"));
+        assert_eq!(
+            doc.settings.title.as_deref(),
+            Some("株式会社サンプル 月次報告")
+        );
         // 以前は独自変数扱いだったため、本文の {{title}} も差し込まれ続けること
         assert!(format!("{:?}", doc.blocks).contains("件名: 株式会社サンプル 月次報告"));
         // ページ設定バーの書き戻しで title 行が失われず、変数もテンプレートのまま残ること
@@ -2006,11 +2028,15 @@ mod tests {
     #[test]
     fn test_frontmatter_font_exact_preset_keywords_still_map_to_presets() {
         assert_eq!(
-            parse_document("---\nfont: gothic\n---\n\n本文\n").settings.font_choice,
+            parse_document("---\nfont: gothic\n---\n\n本文\n")
+                .settings
+                .font_choice,
             FontChoice::Gothic
         );
         assert_eq!(
-            parse_document("---\nfont: Gothic\n---\n\n本文\n").settings.font_choice,
+            parse_document("---\nfont: Gothic\n---\n\n本文\n")
+                .settings
+                .font_choice,
             FontChoice::Gothic
         );
         assert_eq!(
@@ -2020,11 +2046,15 @@ mod tests {
             FontChoice::Gothic
         );
         assert_eq!(
-            parse_document("---\nfont: mincho\n---\n\n本文\n").settings.font_choice,
+            parse_document("---\nfont: mincho\n---\n\n本文\n")
+                .settings
+                .font_choice,
             FontChoice::Mincho
         );
         assert_eq!(
-            parse_document("---\nfont: 明朝\n---\n\n本文\n").settings.font_choice,
+            parse_document("---\nfont: 明朝\n---\n\n本文\n")
+                .settings
+                .font_choice,
             FontChoice::Mincho
         );
     }
@@ -2503,7 +2533,12 @@ mod structure_tests {
     }
 
     fn only_list(doc: &Document) -> (&bool, &u64, &Vec<ListItem>) {
-        assert_eq!(doc.blocks.len(), 1, "ブロックはリスト1つだけのはず: {:?}", doc.blocks);
+        assert_eq!(
+            doc.blocks.len(),
+            1,
+            "ブロックはリスト1つだけのはず: {:?}",
+            doc.blocks
+        );
         match &doc.blocks[0] {
             Block::List {
                 ordered,
@@ -2538,7 +2573,10 @@ mod structure_tests {
         let (ordered, start, items) = only_list(&doc);
         assert!(*ordered);
         assert_eq!(*start, 1);
-        let texts: Vec<_> = items.iter().map(|i| inlines_to_plain_text(&i.content)).collect();
+        let texts: Vec<_> = items
+            .iter()
+            .map(|i| inlines_to_plain_text(&i.content))
+            .collect();
         assert_eq!(texts, ["一", "二", "三"]);
     }
 
@@ -2612,7 +2650,10 @@ mod structure_tests {
     fn three_level_nesting_mixing_ordered_and_bullets() {
         let doc = parse_document("- 一\n  1. 二\n     - 三\n");
         let (_, _, items) = only_list(&doc);
-        let Block::List { ordered, items: l2, .. } = &items[0].children[0] else {
+        let Block::List {
+            ordered, items: l2, ..
+        } = &items[0].children[0]
+        else {
             panic!("2段目のリストがあるはず");
         };
         assert!(*ordered);
@@ -2685,7 +2726,9 @@ mod structure_tests {
 
     #[test]
     fn columns_end_inside_quote_does_not_close_outer_columns() {
-        let doc = parse_document(":::columns 2\n\n> 引用\n>\n> :::columns-end\n\n続き\n\n:::columns-end\n");
+        let doc = parse_document(
+            ":::columns 2\n\n> 引用\n>\n> :::columns-end\n\n続き\n\n:::columns-end\n",
+        );
         assert_eq!(doc.blocks.len(), 1, "{:?}", doc.blocks);
         let Block::Columns { blocks, .. } = &doc.blocks[0] else {
             panic!("段組みのはず");
@@ -2751,13 +2794,22 @@ mod structure_tests {
     #[test]
     fn footnote_reference_is_replaced_with_definition() {
         let doc = parse_document("本文[^1]です。\n\n[^1]: 注記\n");
-        assert_eq!(doc.blocks.len(), 1, "定義はブロックとして出ないはず: {:?}", doc.blocks);
+        assert_eq!(
+            doc.blocks.len(),
+            1,
+            "定義はブロックとして出ないはず: {:?}",
+            doc.blocks
+        );
         let Block::Paragraph { content, .. } = &doc.blocks[0] else {
             panic!("段落のはず");
         };
         assert_eq!(
             content,
-            &vec![text("本文"), fnote(0, false, vec![text("注記")]), text("です。")]
+            &vec![
+                text("本文"),
+                fnote(0, false, vec![text("注記")]),
+                text("です。")
+            ]
         );
     }
 
@@ -2788,13 +2840,18 @@ mod structure_tests {
         };
         assert_eq!(
             content[1],
-            fnote(0, false, vec![text("一段落目"), Inline::HardBreak, text("二段落目")])
+            fnote(
+                0,
+                false,
+                vec![text("一段落目"), Inline::HardBreak, text("二段落目")]
+            )
         );
     }
 
     #[test]
     fn footnote_with_formatting_and_inside_custom_span_and_table_and_list() {
-        let src = "[赤字[^a]]{red}\n\n| A |\n|---|\n| セル[^a] |\n\n- 項目[^a]\n\n[^a]: **太字**の注\n";
+        let src =
+            "[赤字[^a]]{red}\n\n| A |\n|---|\n| セル[^a] |\n\n- 項目[^a]\n\n[^a]: **太字**の注\n";
         let doc = parse_document(src);
         let body = vec![Inline::Strong(vec![text("太字")]), text("の注")];
         match &doc.blocks[0] {

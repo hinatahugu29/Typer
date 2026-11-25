@@ -88,19 +88,15 @@ impl DocxImageCollector {
     }
 
     /// 数式をPNG画像として登録し、その画像を本文に置くランXMLを返す。組版できなければ `None`
-    fn register_math(
-        &mut self,
-        tex: &str,
-        display: bool,
-        style: &RunStyle,
-    ) -> Option<String> {
+    fn register_math(&mut self, tex: &str, display: bool, style: &RunStyle) -> Option<String> {
         let mut settings = self.settings.clone();
         // 見出し・`{size: ...}` の中では、その文字サイズで組む
         if let Some(half_pt) = style.size_half_pt {
             settings.font_size = format!("{}pt", half_pt as f64 / 2.0);
         }
         let color = style.color.as_ref().map(|c| format!("#{c}"));
-        let source = crate::typst_gen::math_snippet_source(tex, display, &settings, color.as_deref());
+        let source =
+            crate::typst_gen::math_snippet_source(tex, display, &settings, color.as_deref());
         let math = crate::typst_engine::render_math(&source)?;
         let rel_id = self.push_image("image/png", "png", math.png.clone());
         let delim = if display { "$$" } else { "$" };
@@ -134,7 +130,11 @@ impl DocxImageCollector {
             _ => return None, // SVG/WebP等はWordのレガシーメディア形式として非対応
         };
         let (px_w, px_h) = probe_image_pixel_size(&bytes, &ext).unwrap_or((400, 300));
-        let ext = if ext == "jpg" { "jpeg".to_string() } else { ext };
+        let ext = if ext == "jpg" {
+            "jpeg".to_string()
+        } else {
+            ext
+        };
         let relationship_id = self.push_image(content_type, &ext, bytes);
         Some((relationship_id, px_w, px_h))
     }
@@ -216,7 +216,10 @@ fn probe_jpeg_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// 内部文書モデルから .docx ファイルのバイト列を生成する（相対パス画像の解決基準ディレクトリ付き）
-pub fn generate_docx_bytes_with_base(doc: &Document, base_dir: Option<&Path>) -> Result<Vec<u8>, String> {
+pub fn generate_docx_bytes_with_base(
+    doc: &Document,
+    base_dir: Option<&Path>,
+) -> Result<Vec<u8>, String> {
     let mut images = DocxImageCollector {
         settings: doc.settings.clone(),
         ..Default::default()
@@ -426,7 +429,15 @@ fn render_docx_block(
             items,
             ..
         } => {
-            render_docx_list(out, *ordered, *start, items, heading_index, base_dir, images);
+            render_docx_list(
+                out,
+                *ordered,
+                *start,
+                items,
+                heading_index,
+                base_dir,
+                images,
+            );
         }
         Block::Table {
             headers,
@@ -562,10 +573,7 @@ fn indent_ind_attr(attrs: &crate::model::BlockAttributes, extra_left: i64) -> St
         None if extra_left > 0 => Some(extra_left),
         None => None,
     };
-    let right = attrs
-        .indent_right
-        .as_deref()
-        .map(|v| length_to_twips(v, 0));
+    let right = attrs.indent_right.as_deref().map(|v| length_to_twips(v, 0));
     if left.is_none() && right.is_none() {
         return String::new();
     }
@@ -737,7 +745,9 @@ fn collect_runs(
                 s.color = Some("1A73E8".to_string());
                 collect_runs(text, s, base_dir, images, out);
             }
-            Inline::Image { alt, url, width, .. } => {
+            Inline::Image {
+                alt, url, width, ..
+            } => {
                 // floatによる絶対配置はWord出力では再現しないため、通常の本文内画像として埋め込む
                 match images.register(url, base_dir) {
                     Some((rel_id, px_w, px_h)) => {
@@ -1079,8 +1089,14 @@ fn build_docx_zip(
             content_types_xml(images, has_footnotes).into_bytes(),
         ),
         ("_rels/.rels".to_string(), ROOT_RELS_XML.as_bytes().to_vec()),
-        ("word/document.xml".to_string(), document_xml.as_bytes().to_vec()),
-        ("word/styles.xml".to_string(), styles_xml.as_bytes().to_vec()),
+        (
+            "word/document.xml".to_string(),
+            document_xml.as_bytes().to_vec(),
+        ),
+        (
+            "word/styles.xml".to_string(),
+            styles_xml.as_bytes().to_vec(),
+        ),
         (
             "word/numbering.xml".to_string(),
             numbering_xml(&collected.nums).into_bytes(),
@@ -1100,7 +1116,10 @@ fn build_docx_zip(
             "word/_rels/footnotes.xml.rels".to_string(),
             wrap_relationships(image_relationships(images)).into_bytes(),
         ));
-        parts.push(("word/settings.xml".to_string(), SETTINGS_XML.as_bytes().to_vec()));
+        parts.push((
+            "word/settings.xml".to_string(),
+            SETTINGS_XML.as_bytes().to_vec(),
+        ));
     }
 
     for (name, bytes) in &parts {
@@ -1125,7 +1144,8 @@ mod tests {
     use crate::parser::parse_document;
 
     fn read_docx_part(doc: &Document, part: &str) -> String {
-        let bytes = generate_docx_bytes_with_base(doc, None).expect("docx generation should succeed");
+        let bytes =
+            generate_docx_bytes_with_base(doc, None).expect("docx generation should succeed");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("valid zip archive");
         let mut file = archive.by_name(part).unwrap();
         let mut s = String::new();
@@ -1144,8 +1164,7 @@ mod tests {
     #[test]
     fn test_custom_font_choice_is_xml_escaped_in_document_defaults() {
         let mut doc = parse_document("本文\n");
-        doc.settings.font_choice =
-            crate::model::FontChoice::Custom(r#"Evil"&<font>"#.to_string());
+        doc.settings.font_choice = crate::model::FontChoice::Custom(r#"Evil"&<font>"#.to_string());
         let styles = read_docx_part(&doc, "word/styles.xml");
         assert!(styles.contains("Evil&quot;&amp;&lt;font&gt;"));
         assert!(!styles.contains(r#"Evil"&<font>"#));
@@ -1160,14 +1179,23 @@ mod tests {
             .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
         for i in 1..=3 {
-            assert!(names.contains(&format!("word/media/image{i}.png")), "{names:?}");
+            assert!(
+                names.contains(&format!("word/media/image{i}.png")),
+                "{names:?}"
+            );
         }
         let document = read_docx_part(&doc, "word/document.xml");
         assert!(document.contains(r#"descr="$x^2$""#));
-        assert!(document.contains(r#"<w:position w:val="-"#), "inline math is lowered to the baseline");
+        assert!(
+            document.contains(r#"<w:position w:val="-"#),
+            "inline math is lowered to the baseline"
+        );
         assert!(document.contains(r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>"#));
         for id in 1..=3 {
-            assert_eq!(document.matches(&format!(r#"<wp:docPr id="{id}""#)).count(), 1);
+            assert_eq!(
+                document.matches(&format!(r#"<wp:docPr id="{id}""#)).count(),
+                1
+            );
         }
         assert!(!document.contains(r#"<wp:docPr id="0""#));
     }
@@ -1187,7 +1215,8 @@ mod tests {
     fn test_generate_docx_bytes_is_a_valid_zip_with_required_parts() {
         let doc =
             parse_document("# 見出し\n\n本文です。\n\n| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
-        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
+        let bytes =
+            generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
         assert!(
             bytes.starts_with(b"PK"),
             "docx must be a zip (PK magic bytes)"
@@ -1270,7 +1299,8 @@ mod tests {
             > 外\n>\n> > 内\n\n\
             脚注つき[^a]の本文\n\n[^a]: 脚注の**中身** $x^2$\n";
         let doc = parse_document(src);
-        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
+        let bytes =
+            generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
 
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
@@ -1310,10 +1340,8 @@ mod tests {
 
     #[test]
     fn test_docx_embeds_local_png_as_media_with_relationship() {
-        let dir = std::env::temp_dir().join(format!(
-            "typer_docx_image_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("typer_docx_image_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let img_path = dir.join("pic.png");
         std::fs::write(&img_path, TINY_PNG).unwrap();
@@ -1380,7 +1408,8 @@ mod structure_tests {
 
     fn part(src: &str, name: &str) -> Option<String> {
         let doc = parse_document(src);
-        let bytes = generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
+        let bytes =
+            generate_docx_bytes_with_base(&doc, None).expect("docx generation should succeed");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut file = archive.by_name(name).ok()?;
         let mut s = String::new();
@@ -1397,7 +1426,8 @@ mod structure_tests {
         let out = document("- a\n- b\n");
         assert!(!out.contains("• "));
         assert_eq!(
-            out.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>").count(),
+            out.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>")
+                .count(),
             2
         );
         let numbering = part("- a\n", "word/numbering.xml").unwrap();
@@ -1409,7 +1439,11 @@ mod structure_tests {
     fn nested_lists_use_deeper_levels_and_separate_numbering() {
         let out = document("1. 一\n   1. 子\n2. 二\n   1. 子\n");
         // 外側は numId 1 のレベル0、入れ子はそれぞれ別の numId（番号が1から振り直される）のレベル1
-        assert_eq!(out.matches("<w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/>").count(), 2);
+        assert_eq!(
+            out.matches("<w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/>")
+                .count(),
+            2
+        );
         assert!(out.contains("<w:ilvl w:val=\"1\"/><w:numId w:val=\"2\"/>"));
         assert!(out.contains("<w:ilvl w:val=\"1\"/><w:numId w:val=\"3\"/>"));
         assert!(out.contains("<w:ind w:left=\"720\" w:hanging=\"360\"/>"));
@@ -1435,20 +1469,33 @@ mod structure_tests {
     #[test]
     fn quote_paragraphs_are_indented_and_nested_quotes_more() {
         let out = document("> 外\n>\n> > 内\n");
-        assert!(out.contains("<w:ind w:left=\"720\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">外"), "{out}");
-        assert!(out.contains("<w:ind w:left=\"1440\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">内"));
+        assert!(
+            out.contains(
+                "<w:ind w:left=\"720\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">外"
+            ),
+            "{out}"
+        );
+        assert!(out.contains(
+            "<w:ind w:left=\"1440\"/></w:pPr><w:r><w:rPr></w:rPr><w:t xml:space=\"preserve\">内"
+        ));
     }
 
     #[test]
     fn list_inside_quote_is_indented_past_the_quote() {
         let out = document("> - a\n");
-        assert!(out.contains("<w:ind w:left=\"1080\" w:hanging=\"360\"/>"), "{out}");
+        assert!(
+            out.contains("<w:ind w:left=\"1080\" w:hanging=\"360\"/>"),
+            "{out}"
+        );
     }
 
     #[test]
     fn table_inside_quote_gets_table_indent() {
         let out = document("> | A |\n> |---|\n> | 1 |\n");
-        assert!(out.contains("<w:tblPr><w:tblInd w:w=\"720\" w:type=\"dxa\"/><w:tblBorders>"), "{out}");
+        assert!(
+            out.contains("<w:tblPr><w:tblInd w:w=\"720\" w:type=\"dxa\"/><w:tblBorders>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1461,7 +1508,11 @@ mod structure_tests {
         assert!(notes.contains("<w:footnote w:type=\"separator\" w:id=\"-1\">"));
         assert!(notes.contains("<w:footnote w:id=\"1\">"));
         assert!(notes.contains(">注A</w:t>"));
-        assert!(notes.contains("<w:b/><w:sz w:val=\"18\"/></w:rPr><w:t xml:space=\"preserve\">注B</w:t>"));
+        assert!(
+            notes.contains(
+                "<w:b/><w:sz w:val=\"18\"/></w:rPr><w:t xml:space=\"preserve\">注B</w:t>"
+            )
+        );
         let rels = part(src, "word/_rels/document.xml.rels").unwrap();
         assert!(rels.contains("Target=\"footnotes.xml\""));
         assert!(rels.contains("Target=\"settings.xml\""));
@@ -1483,7 +1534,10 @@ mod structure_tests {
         let src = "一[^a]、二[^b]、再び[^a]\n\n[^a]: 注A\n\n[^b]: 注B\n";
         let out = document(src);
         assert_eq!(out.matches("<w:footnoteReference").count(), 2);
-        assert!(out.contains("<w:vertAlign w:val=\"superscript\"/></w:rPr><w:t>1</w:t>"), "{out}");
+        assert!(
+            out.contains("<w:vertAlign w:val=\"superscript\"/></w:rPr><w:t>1</w:t>"),
+            "{out}"
+        );
         let notes = part(src, "word/footnotes.xml").unwrap();
         assert_eq!(notes.matches(">注A</w:t>").count(), 1);
     }

@@ -13,8 +13,8 @@ use typst::WorldExt;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration, NativeElement};
 use typst::introspection::Introspector;
-use typst::model::HeadingElem;
 use typst::layout::{Abs, Frame, FrameItem, Point};
+use typst::model::HeadingElem;
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Scalar};
@@ -175,7 +175,9 @@ pub fn render_math(source: &str) -> Option<Arc<RenderedMath>> {
     if let Some(hit) = cache.lock().ok()?.get(source) {
         return hit.clone();
     }
-    let rendered = TypstEngine::new().render_math_uncached(source).map(Arc::new);
+    let rendered = TypstEngine::new()
+        .render_math_uncached(source)
+        .map(Arc::new);
     // 全フォント走査の完了前に組んだ結果は、フォントが足りない可能性があるので覚えない
     if FULL_RESOURCES.get().is_some() {
         if let Ok(mut map) = cache.lock() {
@@ -571,9 +573,8 @@ mod tests {
     fn test_reused_engine_picks_up_full_font_scan_for_latin_only_custom_font() {
         // プレビュー用ワーカーと同様に、起動直後の決め打ちフォント集合で作ったエンジンを
         // 使い回しても、全走査完了後はそちらのフォント（Times New Roman）が使われること
-        let quick = QUICK_RESOURCES.get_or_init(|| {
-            build_shared_resources(load_windows_japanese_fonts_quick())
-        });
+        let quick = QUICK_RESOURCES
+            .get_or_init(|| build_shared_resources(load_windows_japanese_fonts_quick()));
         let mut engine = TypstEngine {
             library: Arc::clone(&quick.library),
             book: Arc::clone(&quick.book),
@@ -591,8 +592,7 @@ mod tests {
         }
 
         let mut doc = parse_document("このドキュメントは README.md を参照\n");
-        doc.settings.font_choice =
-            crate::model::FontChoice::Custom("Times New Roman".to_string());
+        doc.settings.font_choice = crate::model::FontChoice::Custom("Times New Roman".to_string());
         let pdf = engine
             .export_pdf(&generate_typst_source(&doc))
             .expect("pdf");
@@ -676,7 +676,8 @@ mod tests {
     fn test_compile_error_maps_back_to_manuscript_line() {
         // フロントマター・属性行・改ページ指定で行がずれても、壊れたTypstコードの行
         // （原稿の9行目）を指せることを確認する
-        let src = "---\ntitle: テスト\n---\n\n{align: right}\n本文\n\n```typst\n#box[閉じていない\n```\n";
+        let src =
+            "---\ntitle: テスト\n---\n\n{align: right}\n本文\n\n```typst\n#box[閉じていない\n```\n";
         let doc = parse_document(src);
         let (typst_code, map) = crate::typst_gen::generate_typst_source_with_map(&doc, None);
         let mut engine = TypstEngine::new();
@@ -686,7 +687,9 @@ mod tests {
         };
         let described = err.describe(Some(&map));
         assert!(
-            described.iter().any(|d| d.source_line == Some(9) && d.text.starts_with("[原稿 9行目]")),
+            described
+                .iter()
+                .any(|d| d.source_line == Some(9) && d.text.starts_with("[原稿 9行目]")),
             "{described:?}"
         );
     }
@@ -701,7 +704,11 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("an unclosed paren should fail to compile"),
         };
-        let lines: Vec<_> = err.describe(Some(&map)).into_iter().map(|d| d.source_line).collect();
+        let lines: Vec<_> = err
+            .describe(Some(&map))
+            .into_iter()
+            .map(|d| d.source_line)
+            .collect();
         assert!(lines.contains(&Some(8)), "{lines:?}");
     }
 
@@ -745,19 +752,28 @@ mod tests {
             for md in [format!("本文 ${tex}$ 本文\n"), format!("$$\n{tex}\n$$\n")] {
                 let code = generate_typst_source(&parse_document(&md));
                 if let Err(e) = engine.export_pdf(&code) {
-                    failures.push(format!("{tex:?} -> {}: {e}", crate::math::latex_to_typst(&tex)));
+                    failures.push(format!(
+                        "{tex:?} -> {}: {e}",
+                        crate::math::latex_to_typst(&tex)
+                    ));
                 }
             }
         }
-        assert!(failures.is_empty(), "failed to compile:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "failed to compile:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]
     fn test_render_math_measures_baseline_for_inline_alignment() {
         let settings = crate::model::DocumentSettings::default();
         let measure = |tex: &str| {
-            render_math(&crate::typst_gen::math_snippet_source(tex, false, &settings, None))
-                .unwrap_or_else(|| panic!("{tex} should render"))
+            render_math(&crate::typst_gen::math_snippet_source(
+                tex, false, &settings, None,
+            ))
+            .unwrap_or_else(|| panic!("{tex} should render"))
         };
         let x = measure("x");
         let frac = measure(r"\frac{1}{2}");

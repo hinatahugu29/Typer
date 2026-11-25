@@ -200,7 +200,10 @@ pub enum Block {
     /// `:::toc` で挿入する目次。見出し一覧から自動生成される（PDF出力はページ番号付き）
     TableOfContents,
     /// `:::columns N` 〜 `:::columns-end` で囲んだ範囲だけを段組み表示するブロック
-    Columns { count: u8, blocks: Vec<Block> },
+    Columns {
+        count: u8,
+        blocks: Vec<Block>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
