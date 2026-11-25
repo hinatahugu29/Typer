@@ -97,7 +97,8 @@ pub fn generate_typst_source_with_map(
         Orientation::Portrait => "false",
         Orientation::Landscape => "true",
     };
-    let paper = sanitize_ident(&s.paper, "a4");
+    // 知らない用紙名をそのまま渡すとTypstが組版エラーにするため、一覧にない名前はA4にする
+    let paper = crate::model::paper_size_or_default(&s.paper).typst_name;
     let margin = sanitize_length(&s.margin, "20mm");
     let font_size = sanitize_length(&s.font_size, "10.5pt");
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
@@ -971,18 +972,6 @@ fn escape_typst_text(out: &mut String, text: &str) {
             }
             _ => out.push(ch),
         }
-    }
-}
-
-fn sanitize_ident(raw: &str, default: &str) -> String {
-    let s: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    if s.is_empty() {
-        default.to_string()
-    } else {
-        s.to_ascii_lowercase()
     }
 }
 

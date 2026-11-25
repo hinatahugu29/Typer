@@ -1378,13 +1378,32 @@ impl TyperApp {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(RichText::new("⚙ 文書設定:").small().strong());
 
-                    // 用紙向き
+                    // 用紙サイズと向き
+                    let current_paper = crate::model::paper_size(&doc_settings.paper);
+                    egui::ComboBox::from_id_salt("paper_size")
+                        .width(58.0)
+                        .selected_text(current_paper.map(|p| p.label).unwrap_or("A4"))
+                        .show_ui(ui, |ui| {
+                            for paper in crate::model::PAPER_SIZES {
+                                let selected = current_paper == Some(paper);
+                                let label = format!(
+                                    "{} ({}×{}mm)",
+                                    paper.label, paper.width_mm, paper.height_mm
+                                );
+                                if ui.selectable_label(selected, label).clicked() && !selected {
+                                    doc_settings.paper = paper.label.to_string();
+                                    changed = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("用紙サイズ（B4・B5はJIS規格）");
                     let is_portrait = doc_settings.orientation == Orientation::Portrait;
-                    if ui.selectable_label(is_portrait, "A4 縦").clicked() && !is_portrait {
+                    if ui.selectable_label(is_portrait, "縦").clicked() && !is_portrait {
                         doc_settings.orientation = Orientation::Portrait;
                         changed = true;
                     }
-                    if ui.selectable_label(!is_portrait, "A4 横").clicked() && is_portrait {
+                    if ui.selectable_label(!is_portrait, "横").clicked() && is_portrait {
                         doc_settings.orientation = Orientation::Landscape;
                         changed = true;
                     }

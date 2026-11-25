@@ -449,3 +449,83 @@ mod table_layout_tests {
         assert_eq!(rows[0], vec![origin(1, 1); 3]);
     }
 }
+
+/// 使える用紙サイズ（縦向きの寸法）
+#[derive(Debug, PartialEq)]
+pub struct PaperSize {
+    /// 画面とフロントマターでの名前（`paper: B5` など）
+    pub label: &'static str,
+    /// Typstの `page(paper: ...)` に渡す名前
+    pub typst_name: &'static str,
+    pub width_mm: f64,
+    pub height_mm: f64,
+}
+
+/// 使える用紙サイズの一覧（先頭が既定のA4）。B4・B5は日本で使われるJIS規格の寸法
+pub const PAPER_SIZES: &[PaperSize] = &[
+    PaperSize {
+        label: "A4",
+        typst_name: "a4",
+        width_mm: 210.0,
+        height_mm: 297.0,
+    },
+    PaperSize {
+        label: "A3",
+        typst_name: "a3",
+        width_mm: 297.0,
+        height_mm: 420.0,
+    },
+    PaperSize {
+        label: "A5",
+        typst_name: "a5",
+        width_mm: 148.0,
+        height_mm: 210.0,
+    },
+    PaperSize {
+        label: "B4",
+        typst_name: "jis-b4",
+        width_mm: 257.0,
+        height_mm: 364.0,
+    },
+    PaperSize {
+        label: "B5",
+        typst_name: "jis-b5",
+        width_mm: 182.0,
+        height_mm: 257.0,
+    },
+    PaperSize {
+        label: "Letter",
+        typst_name: "us-letter",
+        width_mm: 215.9,
+        height_mm: 279.4,
+    },
+];
+
+/// フロントマターの `paper:` の値から用紙サイズを探す（大文字小文字は区別しない。
+/// `jis-b5` `us-letter` のようなTypstの名前も受け付ける）。知らない名前なら `None`
+pub fn paper_size(raw: &str) -> Option<&'static PaperSize> {
+    let key = raw.trim().to_ascii_lowercase();
+    PAPER_SIZES
+        .iter()
+        .find(|p| p.label.eq_ignore_ascii_case(&key) || p.typst_name == key)
+}
+
+/// 用紙サイズ（知らない名前ならA4）
+pub fn paper_size_or_default(raw: &str) -> &'static PaperSize {
+    paper_size(raw).unwrap_or(&PAPER_SIZES[0])
+}
+
+#[cfg(test)]
+mod paper_tests {
+    use super::*;
+
+    #[test]
+    fn paper_names_are_case_insensitive_and_accept_typst_names() {
+        assert_eq!(paper_size("b5").unwrap().typst_name, "jis-b5");
+        assert_eq!(paper_size("JIS-B5").unwrap().label, "B5");
+        assert_eq!(paper_size("LETTER").unwrap().typst_name, "us-letter");
+        assert_eq!(paper_size(" A3 ").unwrap().width_mm, 297.0);
+        assert!(paper_size("b6").is_none());
+        assert_eq!(paper_size_or_default("unknown").label, "A4");
+    }
+}

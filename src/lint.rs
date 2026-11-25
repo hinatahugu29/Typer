@@ -187,6 +187,16 @@ fn lint_frontmatter(lines: &[&str], warnings: &mut Vec<SyntaxWarning>) -> usize 
             continue;
         }
         match key.as_str() {
+            "paper" => {
+                if crate::model::paper_size(val).is_none() {
+                    let names: Vec<&str> =
+                        crate::model::PAPER_SIZES.iter().map(|p| p.label).collect();
+                    warn(format!(
+                        "paper の「{val}」は使えない用紙サイズのため A4 になります（{}）",
+                        names.join(" / ")
+                    ));
+                }
+            }
             "orientation" => {
                 let v = val.to_ascii_lowercase();
                 if !matches!(

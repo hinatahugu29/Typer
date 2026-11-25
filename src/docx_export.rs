@@ -280,12 +280,20 @@ fn styles_xml(doc: &Document) -> String {
     )
 }
 
+/// 用紙の幅と高さ（twip。1mm = 1440/25.4 twip）。横向きなら入れ替える
+fn page_twips(s: &DocumentSettings) -> (i64, i64) {
+    let paper = crate::model::paper_size_or_default(&s.paper);
+    let to_twips = |mm: f64| (mm * 1440.0 / 25.4).round() as i64;
+    let (w, h) = (to_twips(paper.width_mm), to_twips(paper.height_mm));
+    match s.orientation {
+        Orientation::Portrait => (w, h),
+        Orientation::Landscape => (h, w),
+    }
+}
+
 fn wrap_document_xml(doc: &Document, body_xml: &str) -> String {
     let s = &doc.settings;
-    let (page_w, page_h) = match s.orientation {
-        Orientation::Portrait => (11906, 16838),  // A4 in twips (縦)
-        Orientation::Landscape => (16838, 11906), // A4 in twips (横)
-    };
+    let (page_w, page_h) = page_twips(s);
     let margin_twips = length_to_twips(&s.margin, 1134); // 既定20mm相当
     // ヘッダー・フッターは用紙の端から余白の半分の位置に置く（本文と重ならないように）
     let header_distance = margin_twips / 2;
@@ -360,10 +368,7 @@ fn footer_xml(doc: &Document) -> Option<String> {
     let content = match (text, s.show_page_number) {
         (Some(text), true) => {
             // 右端のタブ位置 = 本文の幅（用紙幅 − 左右の余白）
-            let page_w = match s.orientation {
-                Orientation::Portrait => 11906,
-                Orientation::Landscape => 16838,
-            };
+            let page_w = page_twips(s).0;
             let width = page_w - 2 * length_to_twips(&s.margin, 1134);
             format!(
                 "<w:pPr><w:tabs><w:tab w:val=\"right\" w:pos=\"{width}\"/></w:tabs></w:pPr>{}<w:r>{HEADER_FOOTER_RPR}<w:tab/></w:r>{}",
@@ -563,10 +568,7 @@ fn render_docx_block(
                 .max(rows.first().map(|r| r.len()).unwrap_or(1))
                 .max(1);
             let s = &images.settings;
-            let page_w = match s.orientation {
-                Orientation::Portrait => 11906,
-                Orientation::Landscape => 16838,
-            };
+            let page_w = page_twips(s).0;
             let available =
                 (page_w - 2 * length_to_twips(&s.margin, 1134) - images.indent_twips).max(1440);
             let col_widths = column_widths_twips(attrs.widths.as_deref(), col_count, available);

@@ -153,3 +153,42 @@ fn lint_reports_merge_markers_without_a_target() {
     assert!(warnings[1].message.contains("「^」"));
     assert!(crate::lint::lint_markdown(APPROVAL).is_empty());
 }
+
+/// 用紙サイズ（ロードマップ 16-1）：Typstで組めること、Wordの用紙寸法、知らない名前の扱い
+#[test]
+fn every_paper_size_compiles_and_sets_the_word_page_size() {
+    let mut engine = crate::typst_engine::TypstEngine::new();
+    for paper in crate::model::PAPER_SIZES {
+        for orientation in ["portrait", "landscape"] {
+            let src = format!(
+                "---\npaper: {}\norientation: {orientation}\n---\n本文\n",
+                paper.label
+            );
+            let doc = parse_document(&src);
+            let code = crate::typst_gen::generate_typst_source(&doc);
+            assert!(code.contains(&format!("paper: \"{}\"", paper.typst_name)));
+            engine
+                .export_pdf(&code)
+                .unwrap_or_else(|e| panic!("{} {orientation}: {e}", paper.label));
+            assert!(crate::lint::lint_markdown(&src).is_empty());
+        }
+    }
+    // B5縦（182×257mm）と Letter横
+    assert!(
+        docx_document("---\npaper: B5\n---\n本文\n")
+            .contains("<w:pgSz w:w=\"10318\" w:h=\"14570\"/>")
+    );
+    assert!(
+        docx_document("---\npaper: Letter\norientation: landscape\n---\n本文\n")
+            .contains("<w:pgSz w:w=\"15840\" w:h=\"12240\"/>")
+    );
+    // 知らない用紙名はA4にし、書き方の確認で知らせる
+    let unknown = "---\npaper: B6\n---\n本文\n";
+    assert!(
+        crate::typst_gen::generate_typst_source(&parse_document(unknown)).contains("paper: \"a4\"")
+    );
+    let warnings = crate::lint::lint_markdown(unknown);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].line, 2);
+    assert!(warnings[0].message.contains("B6"));
+}
