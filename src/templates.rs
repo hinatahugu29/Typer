@@ -165,3 +165,140 @@ mod tests {
         }
     }
 }
+
+/// 利用者が保存したテンプレート（`%APPDATA%\Typer\templates\*.md`）1件分
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserTemplate {
+    /// メニューに出す名前（ファイル名から `.md` を除いたもの）
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+
+/// 利用者のテンプレートを置くフォルダ
+pub fn user_templates_dir() -> Option<std::path::PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(
+        std::path::PathBuf::from(appdata)
+            .join("Typer")
+            .join("templates"),
+    )
+}
+
+/// フォルダにあるテンプレートを名前順に返す（フォルダがなければ空）
+pub fn list_user_templates(dir: &std::path::Path) -> Vec<UserTemplate> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut templates: Vec<UserTemplate> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().to_string();
+            Some(UserTemplate { name, path })
+        })
+        .collect();
+    templates.sort_by(|a, b| a.name.cmp(&b.name));
+    templates
+}
+
+/// テンプレートの名前を、ファイル名として使える形にする（空なら `None`）
+fn template_file_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}.md",
+        crate::ui_persistence::sanitize_file_name(trimmed)
+    ))
+}
+
+/// テンプレートとして保存する。`overwrite` が偽で同じ名前がすでにあれば `Err`
+pub fn save_user_template(
+    dir: &std::path::Path,
+    name: &str,
+    content: &str,
+    overwrite: bool,
+) -> Result<std::path::PathBuf, String> {
+    let file_name = template_file_name(name).ok_or("テンプレートの名前を入力してください")?;
+    let path = dir.join(file_name);
+    if path.exists() && !overwrite {
+        return Err("同じ名前のテンプレートがすでにあります".to_string());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("フォルダを作れませんでした: {e}"))?;
+    std::fs::write(&path, content).map_err(|e| format!("保存できませんでした: {e}"))?;
+    Ok(path)
+}
+
+/// テンプレートの名前を変える。変更先の名前がすでにあれば `Err`
+pub fn rename_user_template(
+    template: &UserTemplate,
+    new_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let file_name = template_file_name(new_name).ok_or("新しい名前を入力してください")?;
+    let dir = template
+        .path
+        .parent()
+        .ok_or("テンプレートの場所が分かりません")?;
+    let new_path = dir.join(file_name);
+    if new_path == template.path {
+        return Ok(new_path);
+    }
+    if new_path.exists() {
+        return Err("同じ名前のテンプレートがすでにあります".to_string());
+    }
+    std::fs::rename(&template.path, &new_path)
+        .map_err(|e| format!("名前を変更できませんでした: {e}"))?;
+    Ok(new_path)
+}
+
+#[cfg(test)]
+mod user_template_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("typer-templates-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn save_list_rename_and_refuse_overwrite() {
+        let dir = temp_dir("crud");
+        assert!(list_user_templates(&dir).is_empty());
+
+        let path = save_user_template(&dir, "月次報告", "---\ntitle: 月次\n---\n", false).unwrap();
+        assert_eq!(path.file_name().unwrap(), "月次報告.md");
+        save_user_template(&dir, "議事録（営業部）", "本文", false).unwrap();
+        // 同じ名前は上書きの確認なしでは保存しない
+        assert!(save_user_template(&dir, "月次報告", "別", false).is_err());
+        save_user_template(&dir, "月次報告", "上書き", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "上書き");
+        // 名前が空なら保存しない／ファイル名に使えない文字は置き換える
+        assert!(save_user_template(&dir, "  ", "x", false).is_err());
+        let odd = save_user_template(&dir, "a/b:c", "x", false).unwrap();
+        assert!(!odd.file_name().unwrap().to_string_lossy().contains('/'));
+
+        // .md 以外のファイルは一覧に出さない
+        std::fs::write(dir.join("memo.txt"), "x").unwrap();
+        let names: Vec<String> = list_user_templates(&dir)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"月次報告".to_string()));
+
+        let monthly = list_user_templates(&dir)
+            .into_iter()
+            .find(|t| t.name == "月次報告")
+            .unwrap();
+        // 既にある名前への変更は断る
+        assert!(rename_user_template(&monthly, "議事録（営業部）").is_err());
+        let renamed = rename_user_template(&monthly, "月次報告（2027年版）").unwrap();
+        assert!(renamed.exists() && !monthly.path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

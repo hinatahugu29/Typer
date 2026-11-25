@@ -22,7 +22,10 @@ use crate::model::{FontChoice, Orientation};
 use crate::parser::{
     extract_headings_outline, parse_document, parse_settings, update_document_settings_in_markdown,
 };
-use crate::templates::TEMPLATES;
+use crate::templates::{
+    TEMPLATES, UserTemplate, list_user_templates, rename_user_template, save_user_template,
+    user_templates_dir,
+};
 use crate::typst_engine::{
     CompileError, DescribedError, HeadingPosition, PreviewOutput, TypstEngine,
     available_font_families, available_latin_font_families,
@@ -123,6 +126,25 @@ enum WorkerResponse {
     PreviewReady {
         revision: u64,
         result: Result<PreviewOutput, CompileError>,
+    },
+}
+
+/// 自分のテンプレートの保存・名前の変更・削除の確認ダイアログ
+#[derive(Debug, Clone)]
+enum TemplateDialog {
+    /// 現在の文書をテンプレートとして保存する。`overwrite` は同じ名前があって上書きを確認中
+    Save {
+        name: String,
+        overwrite: bool,
+        error: Option<String>,
+    },
+    Rename {
+        template: UserTemplate,
+        name: String,
+        error: Option<String>,
+    },
+    Delete {
+        template: UserTemplate,
     },
 }
 
@@ -254,6 +276,8 @@ pub struct TyperApp {
     last_autosave_time: Instant,
     /// 直近に自動保存したときの `revision`（変更がなければ自動保存を繰り返さない）
     last_autosaved_revision: u64,
+    /// 開いているテンプレートのダイアログ（保存・名前の変更・削除）
+    template_dialog: Option<TemplateDialog>,
     /// 見出しアウトラインパネルの表示フラグ
     show_outline_panel: bool,
     /// カスタム文字色入力欄（HEXコード）
@@ -376,6 +400,7 @@ impl TyperApp {
             recent_files,
             last_autosave_time: Instant::now(),
             last_autosaved_revision: 0,
+            template_dialog: None,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
@@ -1022,6 +1047,177 @@ impl TyperApp {
         self.revision += 1;
         self.pending_render = true;
         self.last_edit_time = Instant::now();
+    }
+
+    /// 自分のテンプレートを、新しいタブの未保存の文書として開く（テンプレートのファイル自体は変えない）
+    fn open_user_template(&mut self, template: &UserTemplate) {
+        match std::fs::read_to_string(&template.path) {
+            Ok(content) => {
+                self.open_new_tab();
+                self.markdown_text = content;
+                self.revision += 1;
+                self.trigger_preview_update();
+                self.status_message = format!(
+                    "テンプレート「{}」から新しい文書を作りました",
+                    template.name
+                );
+            }
+            Err(e) => {
+                self.status_message = format!("テンプレートを読み込めませんでした: {e}");
+            }
+        }
+    }
+
+    /// 現在の文書をテンプレートとして保存する。同じ名前があり `overwrite` が偽なら `Err`
+    fn save_current_as_template(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        overwrite: bool,
+    ) -> Result<(), String> {
+        let path = save_user_template(dir, name, &self.markdown_text, overwrite)?;
+        let saved_name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.status_message = format!(
+            "テンプレート「{saved_name}」として保存しました（📋 テンプレート から使えます）"
+        );
+        Ok(())
+    }
+
+    fn open_user_templates_folder(&mut self) {
+        let Some(dir) = user_templates_dir() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::process::Command::new("explorer").arg(&dir).spawn() {
+            self.status_message = format!("フォルダを開けませんでした: {e}");
+        }
+    }
+
+    /// テンプレートの保存・名前の変更・削除の確認ダイアログを描画する
+    fn draw_template_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.template_dialog.take() else {
+            return;
+        };
+        let title = match &dialog {
+            TemplateDialog::Save { .. } => "💾 テンプレートとして保存",
+            TemplateDialog::Rename { .. } => "✏ テンプレートの名前を変更",
+            TemplateDialog::Delete { .. } => "🗑 テンプレートの削除",
+        };
+        let mut keep_open = true;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| match &mut dialog {
+                TemplateDialog::Save {
+                    name,
+                    overwrite,
+                    error,
+                } => {
+                    ui.label(
+                        "現在の文書（フロントマターを含む全体）をテンプレートとして保存します。",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("名前:");
+                        if ui.text_edit_singleline(name).changed() {
+                            *overwrite = false;
+                            *error = None;
+                        }
+                    });
+                    if let Some(err) = error {
+                        ui.colored_label(Color32::from_rgb(197, 34, 31), err.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        let label = if *overwrite {
+                            "上書き保存"
+                        } else {
+                            "保存"
+                        };
+                        if ui.button(label).clicked() {
+                            match user_templates_dir() {
+                                Some(dir) => {
+                                    match self.save_current_as_template(&dir, name, *overwrite) {
+                                        Ok(()) => keep_open = false,
+                                        Err(e) => {
+                                            // 同じ名前があるときは、もう一度押すと上書きする
+                                            *overwrite = e.contains("すでに");
+                                            *error = Some(if *overwrite {
+                                                format!("{e}。もう一度押すと上書きします")
+                                            } else {
+                                                e
+                                            });
+                                        }
+                                    }
+                                }
+                                None => *error = Some("保存先のフォルダが分かりません".into()),
+                            }
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+                TemplateDialog::Rename {
+                    template,
+                    name,
+                    error,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label("新しい名前:");
+                        if ui.text_edit_singleline(name).changed() {
+                            *error = None;
+                        }
+                    });
+                    if let Some(err) = error {
+                        ui.colored_label(Color32::from_rgb(197, 34, 31), err.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("変更").clicked() {
+                            match rename_user_template(template, name) {
+                                Ok(_) => {
+                                    self.status_message = format!(
+                                        "テンプレートの名前を「{}」に変更しました",
+                                        name.trim()
+                                    );
+                                    keep_open = false;
+                                }
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+                TemplateDialog::Delete { template } => {
+                    ui.label(format!("テンプレート「{}」を削除しますか？", template.name));
+                    ui.label(
+                        RichText::new("ファイルは完全に削除され、元に戻せません。")
+                            .small()
+                            .color(Color32::from_rgb(197, 34, 31)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("削除する").clicked() {
+                            self.status_message = match std::fs::remove_file(&template.path) {
+                                Ok(()) => {
+                                    format!("テンプレート「{}」を削除しました", template.name)
+                                }
+                                Err(e) => format!("削除できませんでした: {e}"),
+                            };
+                            keep_open = false;
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+            });
+        if keep_open {
+            self.template_dialog = Some(dialog);
+        }
     }
 
     /// クリップボードの表データ（Excelなどでコピーしたセル）をMarkdownの表にして、カーソル位置に貼り付ける
@@ -1984,6 +2180,8 @@ impl eframe::App for TyperApp {
             }
         }
 
+        self.draw_template_dialog(&ctx);
+
         // 未保存確認モーダルダイアログ
         if let Some(action) = self.pending_action.clone() {
             egui::Window::new("⚠ 未保存の変更があります")
@@ -2581,15 +2779,64 @@ impl eframe::App for TyperApp {
                 ui.separator();
 
                 ui.menu_button("📋 テンプレート", |ui| {
+                    ui.label(RichText::new("カーソル位置に挿入").small().weak());
                     for (name, body) in TEMPLATES {
                         if ui.button(*name).clicked() {
                             self.insert_at_cursor(body);
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    ui.label(RichText::new("自分のテンプレート（新しいタブで開く）").small().weak());
+                    let user_templates = user_templates_dir()
+                        .map(|dir| list_user_templates(&dir))
+                        .unwrap_or_default();
+                    if user_templates.is_empty() {
+                        ui.label(RichText::new("まだありません").small().weak());
+                    }
+                    for template in user_templates {
+                        ui.horizontal(|ui| {
+                            if ui.button(format!("📄 {}", template.name)).clicked() {
+                                self.open_user_template(&template);
+                                ui.close();
+                            }
+                            if ui.small_button("✏").on_hover_text("名前を変更").clicked() {
+                                self.template_dialog = Some(TemplateDialog::Rename {
+                                    name: template.name.clone(),
+                                    template: template.clone(),
+                                    error: None,
+                                });
+                                ui.close();
+                            }
+                            if ui.small_button("🗑").on_hover_text("削除").clicked() {
+                                self.template_dialog =
+                                    Some(TemplateDialog::Delete { template: template.clone() });
+                                ui.close();
+                            }
+                        });
+                    }
+                    ui.separator();
+                    if ui.button("💾 現在の文書をテンプレートとして保存...").clicked() {
+                        let name = self
+                            .suggest_file_name()
+                            .trim_end_matches(".md")
+                            .to_string();
+                        self.template_dialog = Some(TemplateDialog::Save {
+                            name,
+                            overwrite: false,
+                            error: None,
+                        });
+                        ui.close();
+                    }
+                    if ui.button("📂 テンプレートのフォルダを開く").clicked() {
+                        self.open_user_templates_folder();
+                        ui.close();
+                    }
                 })
                 .response
-                .on_hover_text("定型の業務文書（議事録・障害報告書など）をカーソル位置に挿入します");
+                .on_hover_text(
+                    "定型の業務文書の挿入と、自分で保存したテンプレートからの新規作成・管理を行います",
+                );
 
                 if ui
                     .small_button("🧩 Typstコード")
@@ -2753,6 +3000,36 @@ mod tests {
     }
 
     #[test]
+    fn test_save_and_open_user_template() {
+        let dir = std::env::temp_dir().join(format!("typer-ui-templates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let original = "---\ntitle: 月次\n---\n# 月次報告\n";
+        let mut app = test_app(original);
+        app.current_file = Some(PathBuf::from("C:/docs/月次.md"));
+        app.save_current_as_template(&dir, "月次報告", false)
+            .unwrap();
+        assert!(app.status_message.contains("月次報告"));
+        // 同じ名前は上書きの確認が要る
+        assert!(
+            app.save_current_as_template(&dir, "月次報告", false)
+                .is_err()
+        );
+
+        let template = list_user_templates(&dir).remove(0);
+        app.open_user_template(&template);
+        // 新しいタブに、ファイル名のない文書として開く（元の文書のタブは残る）
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.markdown_text, original);
+        assert_eq!(app.current_file, None);
+        assert_eq!(
+            app.tabs[0].as_ref().unwrap().current_file,
+            Some(PathBuf::from("C:/docs/月次.md"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_autosave_targets_cover_dirty_background_tabs() {
         let snapshot = |file: Option<&str>, dirty: bool, text: &str| TabSnapshot {
             markdown_text: text.to_string(),
@@ -2868,6 +3145,7 @@ mod tests {
             recent_files: Vec::new(),
             last_autosave_time: Instant::now(),
             last_autosaved_revision: 0,
+            template_dialog: None,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
