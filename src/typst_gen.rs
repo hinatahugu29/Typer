@@ -4,8 +4,8 @@
 //! 表の列幅・ヘッダ背景色・セル折り返し、ローカル画像の埋め込みなど）を適用したTypstコードを生成する。
 
 use crate::model::{
-    Alignment, Block, BlockAttributes, Document, DocumentSettings, FontChoice, Inline, ListItem,
-    InlineStyle, Orientation,
+    Alignment, Block, BlockAttributes, CellSlot, Document, DocumentSettings, FontChoice, Inline,
+    InlineStyle, ListItem, Orientation, TableMerges, resolve_table_layout,
 };
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,78 @@ pub fn generate_typst_source(doc: &Document) -> String {
 }
 
 pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) -> String {
+    generate_typst_source_with_map(doc, base_dir).0
+}
+
+/// 行の目印の開始・終了（私用領域の文字。生成中だけ使い、出力前に必ず取り除く）
+const LINE_MARK_START: char = '\u{E000}';
+const LINE_MARK_END: char = '\u{E001}';
+
+/// 生成したTypstコードの行と、原稿の行との対応表
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SourceLineMap {
+    /// (生成コードの行, 原稿の行) の組。どちらも1始まりで、生成コードの行の昇順
+    entries: Vec<(usize, usize)>,
+}
+
+impl SourceLineMap {
+    /// 生成コードの行（1始まり）が、原稿の何行目（1始まり）に由来するかを返す。
+    /// 本文より前の設定部分（プリアンブル）など、原稿に対応しない行なら `None`
+    pub fn source_line_for(&self, generated_line: usize) -> Option<usize> {
+        let idx = self
+            .entries
+            .partition_point(|&(generated, _)| generated <= generated_line);
+        idx.checked_sub(1).map(|i| self.entries[i].1)
+    }
+}
+
+/// 生成中のコードに「ここから原稿の `line` 行目」という目印を入れる
+fn push_line_marker(out: &mut String, line: Option<usize>) {
+    if let Some(line) = line {
+        let _ = write!(out, "{LINE_MARK_START}{line}{LINE_MARK_END}");
+    }
+}
+
+/// 目印を取り除いたコードと、目印の位置から作った対応表を返す。
+/// 目印は前後の文字を変えずに取り除くので、出力は目印を入れなかった場合と完全に同じになる
+fn extract_line_markers(marked: &str) -> (String, SourceLineMap) {
+    let mut out = String::with_capacity(marked.len());
+    let mut entries: Vec<(usize, usize)> = Vec::new();
+    let mut generated_line = 1usize;
+    let mut rest = marked;
+    while let Some(start) = rest.find(LINE_MARK_START) {
+        let before = &rest[..start];
+        generated_line += before.matches('\n').count();
+        out.push_str(before);
+        let after = &rest[start + LINE_MARK_START.len_utf8()..];
+        let marker = after
+            .find(LINE_MARK_END)
+            .and_then(|end| after[..end].parse::<usize>().ok().map(|line| (end, line)));
+        match marker {
+            Some((end, source_line)) => {
+                // 同じ生成行に複数の目印があれば、後のもの（より内側のブロック）を優先する
+                match entries.last_mut() {
+                    Some(last) if last.0 == generated_line => last.1 = source_line,
+                    _ => entries.push((generated_line, source_line)),
+                }
+                rest = &after[end + LINE_MARK_END.len_utf8()..];
+            }
+            None => {
+                // 目印の形をしていない（原稿に元から入っていた）文字はそのまま残す
+                out.push(LINE_MARK_START);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, SourceLineMap { entries })
+}
+
+/// Typstコードと、その各行が原稿の何行目に由来するかの対応表を生成する
+pub fn generate_typst_source_with_map(
+    doc: &Document,
+    base_dir: Option<&Path>,
+) -> (String, SourceLineMap) {
     let mut out = String::with_capacity(4096);
 
     let s = &doc.settings;
@@ -25,7 +97,8 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
         Orientation::Portrait => "false",
         Orientation::Landscape => "true",
     };
-    let paper = sanitize_ident(&s.paper, "a4");
+    // 知らない用紙名をそのまま渡すとTypstが組版エラーにするため、一覧にない名前はA4にする
+    let paper = crate::model::paper_size_or_default(&s.paper).typst_name;
     let margin = sanitize_length(&s.margin, "20mm");
     let font_size = sanitize_length(&s.font_size, "10.5pt");
     let leading_em = ((s.line_height - 0.65).clamp(0.25, 3.0) * 100.0).round() / 100.0;
@@ -51,7 +124,11 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
 
     // PDFの文書タイトル（ビューアーのタイトルバー・プロパティに出る）
     if let Some(title) = crate::parser::document_title(doc) {
-        let _ = writeln!(out, "#set document(title: \"{}\")", escape_typst_string(&title));
+        let _ = writeln!(
+            out,
+            "#set document(title: \"{}\")",
+            escape_typst_string(&title)
+        );
     }
 
     // ページ・基本組版設定プリアンブル
@@ -113,7 +190,25 @@ pub fn generate_typst_source_with_base(doc: &Document, base_dir: Option<&Path>) 
         render_block(&mut out, block, base_dir);
     }
 
-    out
+    extract_line_markers(&out)
+}
+
+/// ブロックが始まる原稿の行（属性を持たないブロックは `None`）
+fn block_source_line(block: &Block) -> Option<usize> {
+    match block {
+        Block::Heading { attrs, .. }
+        | Block::Paragraph { attrs, .. }
+        | Block::List { attrs, .. }
+        | Block::Table { attrs, .. }
+        | Block::BlockQuote { attrs, .. }
+        | Block::CodeBlock { attrs, .. }
+        | Block::RawTypst { attrs, .. } => attrs.source_line,
+        Block::Spacer { .. }
+        | Block::HorizontalRule
+        | Block::PageBreak
+        | Block::TableOfContents
+        | Block::Columns { .. } => None,
+    }
 }
 
 /// 数式1つだけを、余白0・サイズ自動のページとして組むTypstソース。
@@ -150,8 +245,7 @@ fn font_list_for(s: &DocumentSettings) -> String {
             r#""BIZ UDPGothic", "BIZ UDGothic", "Yu Gothic", "Meiryo", "MS Gothic""#.to_string()
         }
         FontChoice::Mincho => {
-            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#
-                .to_string()
+            r#""BIZ UDPMincho", "BIZ UDMincho", "Yu Mincho", "MS Mincho", "Yu Gothic""#.to_string()
         }
         FontChoice::Custom(name) => {
             let safe_name = sanitize_typst_string_literal(name);
@@ -170,6 +264,7 @@ fn font_list_for(s: &DocumentSettings) -> String {
 }
 
 fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
+    push_line_marker(out, block_source_line(block));
     match block {
         Block::Heading {
             level,
@@ -205,8 +300,9 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             alignments,
             rows,
             attrs,
+            merges,
         } => {
-            render_table(out, headers, alignments, rows, attrs, base_dir);
+            render_table(out, headers, alignments, rows, attrs, merges, base_dir);
             out.push_str("\n\n");
         }
         Block::BlockQuote {
@@ -247,8 +343,20 @@ fn render_block(out: &mut String, block: &Block, base_dir: Option<&Path>) {
             out.push_str("\n\n");
         }
         Block::RawTypst { code, attrs } => {
-            // 上級者向け: エスケープせずTypstソースへそのまま埋め込む
-            wrap_with_block_attrs(out, code, attrs);
+            // 上級者向け: エスケープせずTypstソースへそのまま埋め込む。
+            // 書き間違いが起きやすい箇所なので、1行ずつ原稿の行（フェンスの次の行から）を対応づける
+            let marked_code = match attrs.source_line {
+                Some(fence_line) => {
+                    let mut marked = String::with_capacity(code.len() + 16);
+                    for (i, line) in code.split_inclusive('\n').enumerate() {
+                        push_line_marker(&mut marked, Some(fence_line + 1 + i));
+                        marked.push_str(line);
+                    }
+                    marked
+                }
+                None => code.clone(),
+            };
+            wrap_with_block_attrs(out, &marked_code, attrs);
             out.push_str("\n\n");
         }
         Block::Spacer { height } => {
@@ -288,6 +396,7 @@ fn render_table(
     alignments: &[Option<Alignment>],
     rows: &[Vec<Vec<Inline>>],
     attrs: &BlockAttributes,
+    merges: &TableMerges,
     base_dir: Option<&Path>,
 ) {
     let col_count = headers
@@ -342,26 +451,53 @@ fn render_table(
         let _ = writeln!(table_code, "  inset: (x: 7pt, y: {safe_padding}),");
     }
 
+    let (header_layout, row_layout) =
+        resolve_table_layout(merges, !headers.is_empty(), rows.len(), col_count);
+
     if !headers.is_empty() {
         table_code.push_str("  table.header(");
-        for cell in headers.iter().take(col_count) {
-            render_table_cell(&mut table_code, cell, base_dir, Some("*"), Some("*"));
-            table_code.push_str(", ");
-        }
-        for _ in headers.len()..col_count {
-            table_code.push_str("[], ");
+        for (i, slot) in header_layout.iter().enumerate() {
+            if let CellSlot::Origin {
+                colspan,
+                rowspan,
+                orphan,
+            } = *slot
+            {
+                let cell = headers.get(i).filter(|_| !orphan);
+                render_table_cell(
+                    &mut table_code,
+                    cell.map(Vec::as_slice).unwrap_or(&[]),
+                    base_dir,
+                    (colspan, rowspan),
+                    cell.is_some().then_some(("*", "*")),
+                );
+                table_code.push_str(", ");
+            }
         }
         table_code.push_str("),\n");
     }
 
-    for row in rows {
+    for (i, slots) in row_layout.iter().enumerate() {
         table_code.push_str("  ");
-        for cell in row.iter().take(col_count) {
-            render_table_cell(&mut table_code, cell, base_dir, None, None);
-            table_code.push_str(", ");
-        }
-        for _ in row.len()..col_count {
-            table_code.push_str("[], ");
+        // 表の各行は原稿でも1行ずつ（見出し行・区切り行の次から）書かれている
+        push_line_marker(&mut table_code, attrs.source_line.map(|l| l + 2 + i));
+        for (c, slot) in slots.iter().enumerate() {
+            if let CellSlot::Origin {
+                colspan,
+                rowspan,
+                orphan,
+            } = *slot
+            {
+                let cell = rows[i].get(c).filter(|_| !orphan);
+                render_table_cell(
+                    &mut table_code,
+                    cell.map(Vec::as_slice).unwrap_or(&[]),
+                    base_dir,
+                    (colspan, rowspan),
+                    None,
+                );
+                table_code.push_str(", ");
+            }
         }
         table_code.push('\n');
     }
@@ -371,40 +507,53 @@ fn render_table(
 }
 
 /// セル内容が丸ごと `{bg: ...}` で装飾されている場合、そのセル全体の背景色として扱い、
-/// `table.cell(fill: ...)` でセル単位の完全な塗りつぶしを行う。
+/// `table.cell(fill: ...)` でセル単位の完全な塗りつぶしを行う。結合したセルは
+/// `table.cell(colspan: ..., rowspan: ...)` にする。
 /// それ以外の通常セルは従来通り `[内容]` のコンテンツブロックとして描画する。
 fn render_table_cell(
     out: &mut String,
     cell: &[Inline],
     base_dir: Option<&Path>,
-    content_prefix: Option<&str>,
-    content_suffix: Option<&str>,
+    (colspan, rowspan): (usize, usize),
+    wrap: Option<(&str, &str)>,
 ) {
-    if let [Inline::Styled { content, style }] = cell {
+    let mut params: Vec<String> = Vec::new();
+    if colspan > 1 {
+        params.push(format!("colspan: {colspan}"));
+    }
+    if rowspan > 1 {
+        params.push(format!("rowspan: {rowspan}"));
+    }
+    let mut content: Vec<Inline> = cell.to_vec();
+    if let [
+        Inline::Styled {
+            content: inner,
+            style,
+        },
+    ] = cell
+    {
         if let Some(bg) = &style.bg {
             let mut remaining_style = style.clone();
             remaining_style.bg = None;
-            let cell_content = if remaining_style == InlineStyle::default() {
-                content.clone()
+            content = if remaining_style == InlineStyle::default() {
+                inner.clone()
             } else {
                 vec![Inline::Styled {
-                    content: content.clone(),
+                    content: inner.clone(),
                     style: remaining_style,
                 }]
             };
-            let safe_bg = sanitize_color_hex(bg);
-            let _ = write!(out, "table.cell(fill: rgb(\"{safe_bg}\"))[");
-            out.push_str(content_prefix.unwrap_or(""));
-            render_inlines(out, &cell_content, base_dir);
-            out.push_str(content_suffix.unwrap_or(""));
-            out.push(']');
-            return;
+            params.push(format!("fill: rgb(\"{}\")", sanitize_color_hex(bg)));
         }
     }
+    if !params.is_empty() {
+        let _ = write!(out, "table.cell({})", params.join(", "));
+    }
     out.push('[');
-    out.push_str(content_prefix.unwrap_or(""));
-    render_inlines(out, cell, base_dir);
-    out.push_str(content_suffix.unwrap_or(""));
+    let (prefix, suffix) = wrap.unwrap_or(("", ""));
+    out.push_str(prefix);
+    render_inlines(out, &content, base_dir);
+    out.push_str(suffix);
     out.push(']');
 }
 
@@ -486,6 +635,7 @@ fn render_list(
             out.push_str(", ");
         }
         out.push_str("\n  [");
+        push_line_marker(out, item.source_line);
         match item.checked {
             Some(true) => {
                 out.push_str(TASK_BOX_CHECKED);
@@ -621,7 +771,9 @@ fn render_inlines(out: &mut String, inlines: &[Inline], base_dir: Option<&Path>)
                 content,
                 repeat: false,
             } => {
-                out.push_str("#context if not state(\"typer-in-outline\", false).get() [#footnote[");
+                out.push_str(
+                    "#context if not state(\"typer-in-outline\", false).get() [#footnote[",
+                );
                 render_inlines(out, content, base_dir);
                 let _ = write!(
                     out,
@@ -820,18 +972,6 @@ fn escape_typst_text(out: &mut String, text: &str) {
             }
             _ => out.push(ch),
         }
-    }
-}
-
-fn sanitize_ident(raw: &str, default: &str) -> String {
-    let s: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    if s.is_empty() {
-        default.to_string()
-    } else {
-        s.to_ascii_lowercase()
     }
 }
 
@@ -1188,7 +1328,10 @@ mod tests {
     fn test_ordered_list_default_start_uses_enum_function_form() {
         let doc = parse_document("1. 一番目\n2. 二番目\n");
         let code = generate_typst_source(&doc);
-        assert!(code.contains("#enum(start: 1, \n  [一番目], \n  [二番目]\n)"), "{code}");
+        assert!(
+            code.contains("#enum(start: 1, \n  [一番目], \n  [二番目]\n)"),
+            "{code}"
+        );
     }
 
     #[test]
@@ -1213,7 +1356,63 @@ mod structure_tests {
         for block in &parse_document(src).blocks {
             render_block(&mut out, block, None);
         }
-        out.trim().to_string()
+        extract_line_markers(&out).0.trim().to_string()
+    }
+
+    #[test]
+    fn line_map_points_blocks_rows_and_raw_typst_lines_to_the_manuscript() {
+        let src = "---\ntitle: t\n---\n# 見出し\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\n- 項目1\n- 項目2\n\n```typst\n#let x = 1\n#x\n```\n";
+        let (code, map) = generate_typst_source_with_map(&parse_document(src), None);
+        assert!(!code.contains(LINE_MARK_START) && !code.contains(LINE_MARK_END));
+        let line_of = |needle: &str| {
+            code.lines()
+                .position(|l| l.contains(needle))
+                .map(|i| i + 1)
+                .unwrap()
+        };
+        assert_eq!(map.source_line_for(line_of("= 見出し")), Some(4));
+        assert_eq!(map.source_line_for(line_of("[3], [4]")), Some(9));
+        assert_eq!(map.source_line_for(line_of("[項目2]")), Some(12));
+        assert_eq!(map.source_line_for(line_of("#let x = 1")), Some(15));
+        assert_eq!(map.source_line_for(line_of("#x")), Some(16));
+        // 設定部分（プリアンブル）は原稿のどの行にも対応しない
+        assert_eq!(map.source_line_for(1), None);
+    }
+
+    #[test]
+    fn line_markers_do_not_change_the_generated_code() {
+        let src = "> 引用\n>\n> - 項目\n\n{align: center}\n中央\n";
+        let doc = parse_document(src);
+        let mut stripped = doc.clone();
+        fn clear(blocks: &mut [Block]) {
+            for b in blocks {
+                match b {
+                    Block::Heading { attrs, .. }
+                    | Block::Paragraph { attrs, .. }
+                    | Block::Table { attrs, .. }
+                    | Block::CodeBlock { attrs, .. }
+                    | Block::RawTypst { attrs, .. } => attrs.source_line = None,
+                    Block::List { attrs, items, .. } => {
+                        attrs.source_line = None;
+                        for item in items {
+                            item.source_line = None;
+                            clear(&mut item.children);
+                        }
+                    }
+                    Block::BlockQuote { attrs, blocks } => {
+                        attrs.source_line = None;
+                        clear(blocks);
+                    }
+                    Block::Columns { blocks, .. } => clear(blocks),
+                    _ => {}
+                }
+            }
+        }
+        clear(&mut stripped.blocks);
+        assert_eq!(
+            generate_typst_source(&doc),
+            generate_typst_source(&stripped)
+        );
     }
 
     #[test]
@@ -1224,7 +1423,10 @@ mod structure_tests {
     #[test]
     fn code_block_and_paragraph_go_inside_item() {
         let out = body("1. 手順\n\n   続き\n\n   ```\n   cmd\n   ```\n2. 次\n");
-        assert!(out.starts_with("#enum(start: 1, \n  [手順\n\n続き\n\n#block("), "{out}");
+        assert!(
+            out.starts_with("#enum(start: 1, \n  [手順\n\n続き\n\n#block("),
+            "{out}"
+        );
         assert!(out.contains("```\ncmd\n```]], \n  [次]\n)"), "{out}");
     }
 
@@ -1239,13 +1441,19 @@ mod structure_tests {
     #[test]
     fn custom_start_with_nested_list_is_well_formed() {
         let out = body("3. a\n   - x\n4. b\n");
-        assert_eq!(out, "#enum(start: 3, \n  [a\n\n#list(\n  [x]\n)], \n  [b]\n)");
+        assert_eq!(
+            out,
+            "#enum(start: 3, \n  [a\n\n#list(\n  [x]\n)], \n  [b]\n)"
+        );
     }
 
     #[test]
     fn task_list_hides_bullets_and_draws_boxes() {
         let out = body("- [ ] 未\n- [x] 済\n");
-        assert!(out.starts_with("#list(marker: [], body-indent: 0pt, \n  [#box("), "{out}");
+        assert!(
+            out.starts_with("#list(marker: [], body-indent: 0pt, \n  [#box("),
+            "{out}"
+        );
         assert!(out.contains(&format!("[{TASK_BOX_UNCHECKED} 未]")));
         assert!(out.contains(&format!("[{TASK_BOX_CHECKED} 済]")));
     }
@@ -1280,7 +1488,11 @@ mod structure_tests {
     #[test]
     fn nested_quote_renders_quote_inside_quote() {
         let out = body("> 外\n>\n> > 内\n");
-        assert_eq!(out.matches("#block(width: 100%, fill: rgb(\"#f8f9fa\")").count(), 2);
+        assert_eq!(
+            out.matches("#block(width: 100%, fill: rgb(\"#f8f9fa\")")
+                .count(),
+            2
+        );
         assert!(out.contains("[外\n\n#block("), "{out}");
         assert!(out.contains("[内]]"), "{out}");
     }
@@ -1288,7 +1500,10 @@ mod structure_tests {
     #[test]
     fn quote_inside_columns_renders_inside_columns() {
         let out = body(":::columns 2\n\n> 引用\n\n本文\n\n:::columns-end\n");
-        assert!(out.starts_with("#columns(2, gutter: 18pt)[\n#block("), "{out}");
+        assert!(
+            out.starts_with("#columns(2, gutter: 18pt)[\n#block("),
+            "{out}"
+        );
     }
 
     #[test]

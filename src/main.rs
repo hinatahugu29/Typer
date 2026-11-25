@@ -2,10 +2,13 @@
 
 mod docx_export;
 mod html_export;
+mod lint;
 mod math;
 mod model;
 mod parser;
 mod sample;
+#[cfg(test)]
+mod table_merge_tests;
 mod templates;
 mod typst_engine;
 mod typst_gen;

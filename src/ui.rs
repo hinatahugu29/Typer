@@ -17,15 +17,22 @@ use eframe::egui::{
 
 use crate::docx_export::generate_docx_bytes_with_base;
 use crate::html_export::generate_html_with_base;
+use crate::lint::{SyntaxWarning, lint_markdown};
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{
     extract_headings_outline, parse_document, parse_settings, update_document_settings_in_markdown,
 };
-use crate::templates::TEMPLATES;
-use crate::typst_engine::{
-    HeadingPosition, PreviewOutput, TypstEngine, available_font_families, available_latin_font_families,
+use crate::templates::{
+    TEMPLATES, UserTemplate, list_user_templates, rename_user_template, save_user_template,
+    user_templates_dir,
 };
-use crate::typst_gen::generate_typst_source_with_base;
+use crate::typst_engine::{
+    CompileError, DescribedError, HeadingPosition, PreviewOutput, TypstEngine,
+    available_font_families, available_latin_font_families,
+};
+use crate::typst_gen::{
+    SourceLineMap, generate_typst_source_with_base, generate_typst_source_with_map,
+};
 #[cfg(test)]
 use crate::ui_persistence::recent_files_store_path;
 use crate::ui_persistence::{
@@ -35,7 +42,7 @@ use crate::ui_persistence::{
 };
 use crate::ui_text::{
     byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
-    is_valid_hex_color,
+    is_valid_hex_color, line_char_range, tsv_to_markdown_table,
 };
 
 /// フォント名の入力欄と、入力中の文字で絞り込んだ候補ポップアップを描画する。値が変わったら `true`。
@@ -118,7 +125,26 @@ enum WorkerRequest {
 enum WorkerResponse {
     PreviewReady {
         revision: u64,
-        result: Result<PreviewOutput, String>,
+        result: Result<PreviewOutput, CompileError>,
+    },
+}
+
+/// 自分のテンプレートの保存・名前の変更・削除の確認ダイアログ
+#[derive(Debug, Clone)]
+enum TemplateDialog {
+    /// 現在の文書をテンプレートとして保存する。`overwrite` は同じ名前があって上書きを確認中
+    Save {
+        name: String,
+        overwrite: bool,
+        error: Option<String>,
+    },
+    Rename {
+        template: UserTemplate,
+        name: String,
+        error: Option<String>,
+    },
+    Delete {
+        template: UserTemplate,
     },
 }
 
@@ -217,7 +243,12 @@ pub struct TyperApp {
     /// レンダリング済みページテクスチャ
     page_textures: Vec<(TextureHandle, Vec2)>,
     last_compile_ms: f64,
-    last_error: Option<String>,
+    /// 直近の組版エラー（原稿の行番号付き）
+    last_error: Option<Vec<DescribedError>>,
+    /// 直近に生成したTypstコードの各行が原稿の何行目に由来するか（エラー位置の表示用）
+    last_line_map: SourceLineMap,
+    /// 原稿の書き間違い（効いていない属性指定など）の警告。プレビュー更新のたびに調べ直す
+    syntax_warnings: Vec<SyntaxWarning>,
 
     /// プレビュー表示倍率（1.0 = 100%）
     zoom: f32,
@@ -243,6 +274,10 @@ pub struct TyperApp {
     recent_files: Vec<PathBuf>,
     /// 自動保存の最終実行時刻
     last_autosave_time: Instant,
+    /// 直近に自動保存したときの `revision`（変更がなければ自動保存を繰り返さない）
+    last_autosaved_revision: u64,
+    /// 開いているテンプレートのダイアログ（保存・名前の変更・削除）
+    template_dialog: Option<TemplateDialog>,
     /// 見出しアウトラインパネルの表示フラグ
     show_outline_panel: bool,
     /// カスタム文字色入力欄（HEXコード）
@@ -351,6 +386,8 @@ impl TyperApp {
             page_textures: Vec::new(),
             last_compile_ms: 0.0,
             last_error: None,
+            last_line_map: SourceLineMap::default(),
+            syntax_warnings: Vec::new(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,
@@ -362,6 +399,8 @@ impl TyperApp {
             startup_visibility_ensured: false,
             recent_files,
             last_autosave_time: Instant::now(),
+            last_autosaved_revision: 0,
+            template_dialog: None,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
@@ -399,7 +438,9 @@ impl TyperApp {
             })
             .collect();
         self.active_tab = active;
-        let snapshot = self.tabs[active].take().expect("復元直後のスロットは必ずSome");
+        let snapshot = self.tabs[active]
+            .take()
+            .expect("復元直後のスロットは必ずSome");
         self.load_tab_snapshot(snapshot);
         self.status_message = format!("前回のタブを復元しました（{count}件）");
     }
@@ -476,7 +517,10 @@ impl TyperApp {
     fn trigger_preview_update(&mut self) {
         let doc = parse_document(&self.markdown_text);
         let base = self.base_dir();
-        self.last_typst_code = generate_typst_source_with_base(&doc, base.as_deref());
+        let (typst_code, line_map) = generate_typst_source_with_map(&doc, base.as_deref());
+        self.last_typst_code = typst_code;
+        self.last_line_map = line_map;
+        self.syntax_warnings = lint_markdown(&self.markdown_text);
         self.is_compiling = true;
         self.pending_render = false;
 
@@ -523,7 +567,8 @@ impl TyperApp {
                             }
                         }
                         Err(err) => {
-                            self.last_error = Some(err);
+                            // 古い結果は上で捨てているので、この対応表は同じ版の原稿から作ったもの
+                            self.last_error = Some(err.describe(Some(&self.last_line_map)));
                         }
                     }
                 }
@@ -701,21 +746,52 @@ impl TyperApp {
     /// 編集停止から一定時間が経過していれば自動保存バックアップを書き出す（失敗は無視）
     fn maybe_autosave(&mut self) {
         const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
-        if !self.is_dirty {
+        // 表示中のタブだけでなく、裏のタブの未保存の変更も対象にする。
+        // 前回の自動保存から何も変わっていなければ書き直さない
+        if !self.any_unsaved_changes() || self.revision == self.last_autosaved_revision {
             return;
         }
         if self.last_autosave_time.elapsed() < AUTOSAVE_INTERVAL {
             return;
         }
         self.last_autosave_time = Instant::now();
-        if let Some(path) = autosave_path_for(&self.current_file) {
+        self.last_autosaved_revision = self.revision;
+        for (path, text) in self.autosave_targets() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&path, &self.markdown_text);
+            let _ = std::fs::write(&path, text);
         }
         // 異常終了時にも直近のタブ構成が残るよう、自動保存のタイミングでセッションも書き出す
         self.save_session_now();
+    }
+
+    /// 自動保存で書き出す (保存先, 本文) の一覧。未保存の変更があるタブすべてが対象
+    fn autosave_targets(&self) -> Vec<(PathBuf, String)> {
+        let mut untitled = 0usize;
+        let mut targets = Vec::new();
+        for (i, slot) in self.tabs.iter().enumerate() {
+            let (file, dirty, text) = match slot {
+                Some(s) => (&s.current_file, s.is_dirty, &s.markdown_text),
+                None if i == self.active_tab => {
+                    (&self.current_file, self.is_dirty, &self.markdown_text)
+                }
+                None => continue,
+            };
+            let index = if file.is_none() {
+                untitled += 1;
+                untitled - 1
+            } else {
+                0
+            };
+            if !dirty {
+                continue;
+            }
+            if let Some(path) = autosave_path_for(file, index) {
+                targets.push((path, text.clone()));
+            }
+        }
+        targets
     }
 
     /// 未保存の新規文書のファイル名候補を推測する（優先順位: フロントマターの `title:` → 最初のH1見出し → 既定値）
@@ -788,7 +864,7 @@ impl TyperApp {
             let start = Instant::now();
             let doc = self.parse_for_export();
             let base = self.base_dir();
-            let typst_code = generate_typst_source_with_base(&doc, base.as_deref());
+            let (typst_code, line_map) = generate_typst_source_with_map(&doc, base.as_deref());
             let mut engine = TypstEngine::new();
             match engine.export_pdf(&typst_code) {
                 Ok(pdf_bytes) => match std::fs::write(&path, pdf_bytes) {
@@ -803,7 +879,12 @@ impl TyperApp {
                     }
                 },
                 Err(e) => {
-                    self.status_message = format!("PDF組版エラー: {e}");
+                    let described: Vec<String> = e
+                        .describe(Some(&line_map))
+                        .into_iter()
+                        .map(|d| d.text)
+                        .collect();
+                    self.status_message = format!("PDF組版エラー: {}", described.join(" / "));
                 }
             }
         }
@@ -966,6 +1047,204 @@ impl TyperApp {
         self.revision += 1;
         self.pending_render = true;
         self.last_edit_time = Instant::now();
+    }
+
+    /// 自分のテンプレートを、新しいタブの未保存の文書として開く（テンプレートのファイル自体は変えない）
+    fn open_user_template(&mut self, template: &UserTemplate) {
+        match std::fs::read_to_string(&template.path) {
+            Ok(content) => {
+                self.open_new_tab();
+                self.markdown_text = content;
+                self.revision += 1;
+                self.trigger_preview_update();
+                self.status_message = format!(
+                    "テンプレート「{}」から新しい文書を作りました",
+                    template.name
+                );
+            }
+            Err(e) => {
+                self.status_message = format!("テンプレートを読み込めませんでした: {e}");
+            }
+        }
+    }
+
+    /// 現在の文書をテンプレートとして保存する。同じ名前があり `overwrite` が偽なら `Err`
+    fn save_current_as_template(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        overwrite: bool,
+    ) -> Result<(), String> {
+        let path = save_user_template(dir, name, &self.markdown_text, overwrite)?;
+        let saved_name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.status_message = format!(
+            "テンプレート「{saved_name}」として保存しました（📋 テンプレート から使えます）"
+        );
+        Ok(())
+    }
+
+    fn open_user_templates_folder(&mut self) {
+        let Some(dir) = user_templates_dir() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::process::Command::new("explorer").arg(&dir).spawn() {
+            self.status_message = format!("フォルダを開けませんでした: {e}");
+        }
+    }
+
+    /// テンプレートの保存・名前の変更・削除の確認ダイアログを描画する
+    fn draw_template_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.template_dialog.take() else {
+            return;
+        };
+        let title = match &dialog {
+            TemplateDialog::Save { .. } => "💾 テンプレートとして保存",
+            TemplateDialog::Rename { .. } => "✏ テンプレートの名前を変更",
+            TemplateDialog::Delete { .. } => "🗑 テンプレートの削除",
+        };
+        let mut keep_open = true;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| match &mut dialog {
+                TemplateDialog::Save {
+                    name,
+                    overwrite,
+                    error,
+                } => {
+                    ui.label(
+                        "現在の文書（フロントマターを含む全体）をテンプレートとして保存します。",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("名前:");
+                        if ui.text_edit_singleline(name).changed() {
+                            *overwrite = false;
+                            *error = None;
+                        }
+                    });
+                    if let Some(err) = error {
+                        ui.colored_label(Color32::from_rgb(197, 34, 31), err.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        let label = if *overwrite {
+                            "上書き保存"
+                        } else {
+                            "保存"
+                        };
+                        if ui.button(label).clicked() {
+                            match user_templates_dir() {
+                                Some(dir) => {
+                                    match self.save_current_as_template(&dir, name, *overwrite) {
+                                        Ok(()) => keep_open = false,
+                                        Err(e) => {
+                                            // 同じ名前があるときは、もう一度押すと上書きする
+                                            *overwrite = e.contains("すでに");
+                                            *error = Some(if *overwrite {
+                                                format!("{e}。もう一度押すと上書きします")
+                                            } else {
+                                                e
+                                            });
+                                        }
+                                    }
+                                }
+                                None => *error = Some("保存先のフォルダが分かりません".into()),
+                            }
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+                TemplateDialog::Rename {
+                    template,
+                    name,
+                    error,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label("新しい名前:");
+                        if ui.text_edit_singleline(name).changed() {
+                            *error = None;
+                        }
+                    });
+                    if let Some(err) = error {
+                        ui.colored_label(Color32::from_rgb(197, 34, 31), err.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("変更").clicked() {
+                            match rename_user_template(template, name) {
+                                Ok(_) => {
+                                    self.status_message = format!(
+                                        "テンプレートの名前を「{}」に変更しました",
+                                        name.trim()
+                                    );
+                                    keep_open = false;
+                                }
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+                TemplateDialog::Delete { template } => {
+                    ui.label(format!("テンプレート「{}」を削除しますか？", template.name));
+                    ui.label(
+                        RichText::new("ファイルは完全に削除され、元に戻せません。")
+                            .small()
+                            .color(Color32::from_rgb(197, 34, 31)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("削除する").clicked() {
+                            self.status_message = match std::fs::remove_file(&template.path) {
+                                Ok(()) => {
+                                    format!("テンプレート「{}」を削除しました", template.name)
+                                }
+                                Err(e) => format!("削除できませんでした: {e}"),
+                            };
+                            keep_open = false;
+                        }
+                        if ui.button("キャンセル").clicked() {
+                            keep_open = false;
+                        }
+                    });
+                }
+            });
+        if keep_open {
+            self.template_dialog = Some(dialog);
+        }
+    }
+
+    /// クリップボードの表データ（Excelなどでコピーしたセル）をMarkdownの表にして、カーソル位置に貼り付ける
+    fn paste_table_from_clipboard(&mut self) {
+        let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+        match text {
+            Ok(text) => self.insert_table_from_tsv(&text),
+            Err(_) => {
+                self.status_message = "クリップボードの文字を読み取れませんでした".to_string();
+            }
+        }
+    }
+
+    /// タブ区切りのテキストを表に変換して挿入する（変換できなければ何もせず知らせる）
+    fn insert_table_from_tsv(&mut self, text: &str) {
+        match tsv_to_markdown_table(text) {
+            Some(table) => {
+                let rows = table.lines().count().saturating_sub(2);
+                self.insert_at_cursor(&format!("\n{table}\n"));
+                self.status_message = format!("表を貼り付けました（見出し行＋{rows}行）");
+            }
+            None => {
+                self.status_message =
+                    "クリップボードに表のデータがありません（Excelなどでセルを範囲選択してコピーしてください）"
+                        .to_string();
+            }
+        }
     }
 
     /// 選択中のテキストがあれば `prefix` と `suffix` で囲み、なければ `prefix + default_inner + suffix` を挿入する
@@ -1140,6 +1419,111 @@ impl TyperApp {
         }
     }
 
+    /// エディタのカーソルを原稿の指定行（1始まり）へ移し、その行を選択して表示する
+    fn jump_to_source_line(&mut self, line: usize) {
+        let Some((start, end)) = line_char_range(&self.markdown_text, line) else {
+            return;
+        };
+        self.cursor_char_range = Some((start, end));
+        self.pending_cursor_selection = Some((start, end));
+        self.status_message = format!("原稿の{line}行目へ移動しました");
+    }
+
+    /// プレビュー上部の組版エラー欄と書き間違いの警告欄を描画する。
+    /// 原稿の行が分かるものはクリックでその行へ移動できる
+    fn draw_message_panel(&mut self, ui: &mut egui::Ui) {
+        let mut jump_to: Option<usize> = None;
+        self.draw_compile_errors(ui, &mut jump_to);
+        self.draw_syntax_warnings(ui, &mut jump_to);
+        if let Some(line) = jump_to {
+            self.jump_to_source_line(line);
+        }
+    }
+
+    /// 書き間違いの警告欄（組版は止まらないが、指定が効いていない箇所）
+    fn draw_syntax_warnings(&self, ui: &mut egui::Ui, jump_to: &mut Option<usize>) {
+        const MAX_SHOWN: usize = 5;
+        if self.syntax_warnings.is_empty() {
+            return;
+        }
+        let warn_color = Color32::from_rgb(150, 85, 0);
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(254, 247, 224))
+            .inner_margin(8.0)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "✎ 書き方の確認（{}件）：次の指定は効いていません",
+                        self.syntax_warnings.len()
+                    ))
+                    .small()
+                    .strong()
+                    .color(warn_color),
+                );
+                for w in self.syntax_warnings.iter().take(MAX_SHOWN) {
+                    let text = RichText::new(format!("[原稿 {}行目] {}", w.line, w.message))
+                        .small()
+                        .color(warn_color)
+                        .underline();
+                    if ui
+                        .add(egui::Label::new(text).sense(Sense::click()))
+                        .on_hover_text("クリックで原稿のこの行へ移動します")
+                        .clicked()
+                    {
+                        *jump_to = Some(w.line);
+                    }
+                }
+                if self.syntax_warnings.len() > MAX_SHOWN {
+                    ui.label(
+                        RichText::new(format!(
+                            "…ほか {}件（上から順に直すと続きが表示されます）",
+                            self.syntax_warnings.len() - MAX_SHOWN
+                        ))
+                        .small()
+                        .color(warn_color),
+                    );
+                }
+            });
+    }
+
+    /// 組版エラー欄（組版できず、直前のプレビューのまま）
+    fn draw_compile_errors(&self, ui: &mut egui::Ui, jump_to: &mut Option<usize>) {
+        let Some(errors) = &self.last_error else {
+            return;
+        };
+        let error_color = Color32::from_rgb(197, 34, 31);
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(253, 232, 230))
+            .inner_margin(8.0)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                let heading = if self.page_textures.is_empty() {
+                    "⚠ 組版エラー（直すとプレビューが表示されます）"
+                } else {
+                    "⚠ 組版エラー（直前のプレビューを表示しています）"
+                };
+                ui.label(RichText::new(heading).small().strong().color(error_color));
+                for err in errors {
+                    let text = RichText::new(&err.text).small().color(error_color);
+                    match err.source_line {
+                        Some(line) => {
+                            if ui
+                                .add(egui::Label::new(text.underline()).sense(Sense::click()))
+                                .on_hover_text("クリックで原稿のこの行へ移動します")
+                                .clicked()
+                            {
+                                *jump_to = Some(line);
+                            }
+                        }
+                        None => {
+                            ui.label(text);
+                        }
+                    }
+                }
+            });
+    }
+
     /// 見出しアウトラインパネルを描画する（クリックで該当見出しへジャンプ）
     fn draw_outline_panel(&mut self, ui: &mut egui::Ui) {
         // egui標準のリサイズは中身の描画サイズから幅を記憶し直すため、ドラッグした幅が保持されなかった。
@@ -1224,13 +1608,32 @@ impl TyperApp {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(RichText::new("⚙ 文書設定:").small().strong());
 
-                    // 用紙向き
+                    // 用紙サイズと向き
+                    let current_paper = crate::model::paper_size(&doc_settings.paper);
+                    egui::ComboBox::from_id_salt("paper_size")
+                        .width(58.0)
+                        .selected_text(current_paper.map(|p| p.label).unwrap_or("A4"))
+                        .show_ui(ui, |ui| {
+                            for paper in crate::model::PAPER_SIZES {
+                                let selected = current_paper == Some(paper);
+                                let label = format!(
+                                    "{} ({}×{}mm)",
+                                    paper.label, paper.width_mm, paper.height_mm
+                                );
+                                if ui.selectable_label(selected, label).clicked() && !selected {
+                                    doc_settings.paper = paper.label.to_string();
+                                    changed = true;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("用紙サイズ（B4・B5はJIS規格）");
                     let is_portrait = doc_settings.orientation == Orientation::Portrait;
-                    if ui.selectable_label(is_portrait, "A4 縦").clicked() && !is_portrait {
+                    if ui.selectable_label(is_portrait, "縦").clicked() && !is_portrait {
                         doc_settings.orientation = Orientation::Portrait;
                         changed = true;
                     }
-                    if ui.selectable_label(!is_portrait, "A4 横").clicked() && is_portrait {
+                    if ui.selectable_label(!is_portrait, "横").clicked() && is_portrait {
                         doc_settings.orientation = Orientation::Landscape;
                         changed = true;
                     }
@@ -1563,7 +1966,11 @@ impl TyperApp {
                         self.replace_all_matches();
                     }
 
-                    if ui.small_button("✖").on_hover_text("検索バーを閉じる").clicked() {
+                    if ui
+                        .small_button("✖")
+                        .on_hover_text("検索バーを閉じる")
+                        .clicked()
+                    {
                         self.show_find_replace = false;
                     }
                 });
@@ -1651,6 +2058,10 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
             self.insert_at_cursor("\n:::space 1em\n");
         }
+        // Excelなどからコピーしたセルを表として貼り付ける（通常の Ctrl+V はそのまま）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V)) {
+            self.paste_table_from_clipboard();
+        }
 
         // 文字色（Ctrl+Alt+数字）
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num1)) {
@@ -1723,8 +2134,7 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
             self.preview_maximized = !self.preview_maximized;
         }
-        if self.preview_maximized
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        if self.preview_maximized && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.preview_maximized = false;
         }
@@ -1769,6 +2179,8 @@ impl eframe::App for TyperApp {
                 ctx.request_repaint_after(Duration::from_millis(120) - elapsed);
             }
         }
+
+        self.draw_template_dialog(&ctx);
 
         // 未保存確認モーダルダイアログ
         if let Some(action) = self.pending_action.clone() {
@@ -2012,120 +2424,107 @@ impl eframe::App for TyperApp {
                 .size_range(320.0..=1200.0)
         };
         preview_panel.show(ui, |ui| {
-                if let Some(err) = &self.last_error {
-                    egui::Frame::NONE
-                        .fill(Color32::from_rgb(253, 232, 230))
-                        .inner_margin(8.0)
-                        .corner_radius(4.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("⚠ 構文・組版メッセージ: {err}"))
-                                    .small()
-                                    .color(Color32::from_rgb(197, 34, 31)),
-                            );
-                        });
-                }
+            self.draw_message_panel(ui);
 
-                if self.show_typst_source {
-                    egui::Panel::bottom("typst_source_inspector")
-                        .resizable(true)
-                        .default_size(180.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("生成されたTypst組版コード (自動変換)").strong(),
-                                );
-                                if ui
-                                    .small_button("📋 コピー")
-                                    .on_hover_text(
-                                        "生成されたTypstコードをクリップボードにコピーします",
-                                    )
-                                    .clicked()
-                                {
-                                    ui.ctx().copy_text(self.last_typst_code.clone());
-                                    self.status_message =
-                                        "Typstコードをクリップボードにコピーしました".to_string();
-                                }
-                            });
-                            egui::ScrollArea::vertical()
-                                .id_salt("typst_code_scroll")
-                                .show(ui, |ui| {
-                                    let mut code_view = self.last_typst_code.as_str();
-                                    ui.add(
-                                        TextEdit::multiline(&mut code_view)
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY),
-                                    );
-                                });
-                        });
-                }
-
-                egui::Frame::NONE
-                    .fill(Color32::from_rgb(228, 231, 235))
-                    .inner_margin(16.0)
+            if self.show_typst_source {
+                egui::Panel::bottom("typst_source_inspector")
+                    .resizable(true)
+                    .default_size(180.0)
                     .show(ui, |ui| {
-                        egui::ScrollArea::both()
-                            .id_salt("page_preview_scroll")
-                            .auto_shrink([false, false])
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("生成されたTypst組版コード (自動変換)").strong(),
+                            );
+                            if ui
+                                .small_button("📋 コピー")
+                                .on_hover_text(
+                                    "生成されたTypstコードをクリップボードにコピーします",
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(self.last_typst_code.clone());
+                                self.status_message =
+                                    "Typstコードをクリップボードにコピーしました".to_string();
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("typst_code_scroll")
                             .show(ui, |ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 20.0;
-
-                                    for (idx, (tex, base_size)) in
-                                        self.page_textures.iter().enumerate()
-                                    {
-                                        let display_size = *base_size * self.zoom * 0.85;
-
-                                        let (rect, _) =
-                                            ui.allocate_exact_size(display_size, Sense::hover());
-                                        if let Some((page, y_pt)) = self.pending_preview_jump
-                                            && page == idx
-                                        {
-                                            // base_size はpt単位なので、表示倍率を掛ければ画面上の位置になる
-                                            let y = rect.top() + y_pt * self.zoom * 0.85;
-                                            let target = egui::Rect::from_min_max(
-                                                egui::pos2(rect.left(), y - 12.0),
-                                                egui::pos2(rect.right(), y),
-                                            );
-                                            ui.scroll_to_rect(target, Some(egui::Align::Min));
-                                            self.pending_preview_jump = None;
-                                        }
-                                        let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
-                                        ui.painter().rect_filled(
-                                            shadow_rect,
-                                            2.0,
-                                            Color32::from_black_alpha(38),
-                                        );
-                                        ui.painter().image(
-                                            tex.id(),
-                                            rect,
-                                            egui::Rect::from_min_max(
-                                                egui::pos2(0.0, 0.0),
-                                                egui::pos2(1.0, 1.0),
-                                            ),
-                                            Color32::WHITE,
-                                        );
-                                        ui.painter().rect_stroke(
-                                            rect,
-                                            0.0,
-                                            Stroke::new(1.0, Color32::from_rgb(189, 193, 198)),
-                                            egui::StrokeKind::Outside,
-                                        );
-
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "- {} / {} -",
-                                                idx + 1,
-                                                self.page_textures.len()
-                                            ))
-                                            .small()
-                                            .weak(),
-                                        );
-                                    }
-                                });
+                                let mut code_view = self.last_typst_code.as_str();
+                                ui.add(
+                                    TextEdit::multiline(&mut code_view)
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY),
+                                );
                             });
                     });
-            });
+            }
+
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(228, 231, 235))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("page_preview_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.spacing_mut().item_spacing.y = 20.0;
+
+                                for (idx, (tex, base_size)) in self.page_textures.iter().enumerate()
+                                {
+                                    let display_size = *base_size * self.zoom * 0.85;
+
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(display_size, Sense::hover());
+                                    if let Some((page, y_pt)) = self.pending_preview_jump
+                                        && page == idx
+                                    {
+                                        // base_size はpt単位なので、表示倍率を掛ければ画面上の位置になる
+                                        let y = rect.top() + y_pt * self.zoom * 0.85;
+                                        let target = egui::Rect::from_min_max(
+                                            egui::pos2(rect.left(), y - 12.0),
+                                            egui::pos2(rect.right(), y),
+                                        );
+                                        ui.scroll_to_rect(target, Some(egui::Align::Min));
+                                        self.pending_preview_jump = None;
+                                    }
+                                    let shadow_rect = rect.translate(Vec2::new(4.0, 5.0));
+                                    ui.painter().rect_filled(
+                                        shadow_rect,
+                                        2.0,
+                                        Color32::from_black_alpha(38),
+                                    );
+                                    ui.painter().image(
+                                        tex.id(),
+                                        rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        Color32::WHITE,
+                                    );
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        0.0,
+                                        Stroke::new(1.0, Color32::from_rgb(189, 193, 198)),
+                                        egui::StrokeKind::Outside,
+                                    );
+
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "- {} / {} -",
+                                            idx + 1,
+                                            self.page_textures.len()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                }
+                            });
+                        });
+                });
+        });
 
         if self.preview_maximized {
             return;
@@ -2282,6 +2681,15 @@ impl eframe::App for TyperApp {
                     );
                 }
                 if ui
+                    .small_button("📥 Excelから表")
+                    .on_hover_text(
+                        "Excelなどでコピーしたセルを、Markdownの表にしてカーソル位置に貼り付けます (Ctrl+Shift+V)",
+                    )
+                    .clicked()
+                {
+                    self.paste_table_from_clipboard();
+                }
+                if ui
                     .small_button("📏 行高さ指定")
                     .on_hover_text("直前の表に行の上下パディング（セル内余白）指定を挿入します")
                     .clicked()
@@ -2371,15 +2779,64 @@ impl eframe::App for TyperApp {
                 ui.separator();
 
                 ui.menu_button("📋 テンプレート", |ui| {
+                    ui.label(RichText::new("カーソル位置に挿入").small().weak());
                     for (name, body) in TEMPLATES {
                         if ui.button(*name).clicked() {
                             self.insert_at_cursor(body);
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    ui.label(RichText::new("自分のテンプレート（新しいタブで開く）").small().weak());
+                    let user_templates = user_templates_dir()
+                        .map(|dir| list_user_templates(&dir))
+                        .unwrap_or_default();
+                    if user_templates.is_empty() {
+                        ui.label(RichText::new("まだありません").small().weak());
+                    }
+                    for template in user_templates {
+                        ui.horizontal(|ui| {
+                            if ui.button(format!("📄 {}", template.name)).clicked() {
+                                self.open_user_template(&template);
+                                ui.close();
+                            }
+                            if ui.small_button("✏").on_hover_text("名前を変更").clicked() {
+                                self.template_dialog = Some(TemplateDialog::Rename {
+                                    name: template.name.clone(),
+                                    template: template.clone(),
+                                    error: None,
+                                });
+                                ui.close();
+                            }
+                            if ui.small_button("🗑").on_hover_text("削除").clicked() {
+                                self.template_dialog =
+                                    Some(TemplateDialog::Delete { template: template.clone() });
+                                ui.close();
+                            }
+                        });
+                    }
+                    ui.separator();
+                    if ui.button("💾 現在の文書をテンプレートとして保存...").clicked() {
+                        let name = self
+                            .suggest_file_name()
+                            .trim_end_matches(".md")
+                            .to_string();
+                        self.template_dialog = Some(TemplateDialog::Save {
+                            name,
+                            overwrite: false,
+                            error: None,
+                        });
+                        ui.close();
+                    }
+                    if ui.button("📂 テンプレートのフォルダを開く").clicked() {
+                        self.open_user_templates_folder();
+                        ui.close();
+                    }
                 })
                 .response
-                .on_hover_text("定型の業務文書（議事録・障害報告書など）をカーソル位置に挿入します");
+                .on_hover_text(
+                    "定型の業務文書の挿入と、自分で保存したテンプレートからの新規作成・管理を行います",
+                );
 
                 if ui
                     .small_button("🧩 Typstコード")
@@ -2508,6 +2965,140 @@ mod tests {
         assert_eq!(char_idx_to_line_col(s, 4), (2, 1));
     }
 
+    #[test]
+    fn test_line_char_range_and_jump_to_source_line() {
+        let s = "あいう\r\nえお\n\nか";
+        assert_eq!(line_char_range(s, 1), Some((0, 3)));
+        assert_eq!(line_char_range(s, 2), Some((5, 7)));
+        assert_eq!(line_char_range(s, 3), Some((8, 8)));
+        assert_eq!(line_char_range(s, 4), Some((9, 10)));
+        assert_eq!(line_char_range(s, 5), None);
+        assert_eq!(line_char_range(s, 0), None);
+
+        let mut app = test_app("# 見出し\n\n本文の行\n");
+        app.jump_to_source_line(3);
+        assert_eq!(app.pending_cursor_selection, Some((7, 11)));
+        // 存在しない行へは移動しない
+        app.pending_cursor_selection = None;
+        app.jump_to_source_line(99);
+        assert_eq!(app.pending_cursor_selection, None);
+    }
+
+    /// 実際のクリップボードから読んで変換できることの確認（クリップボードを使うため普段は動かさない）。
+    /// 事前に Excel でセルをコピーするか、`Set-Clipboard "a`tb"` してから
+    /// `cargo test clipboard_table -- --ignored` で実行する
+    #[test]
+    #[ignore]
+    fn clipboard_table_paste_reads_the_system_clipboard() {
+        let mut app = test_app("");
+        app.paste_table_from_clipboard();
+        assert!(
+            app.markdown_text.contains("| --- |"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn test_save_and_open_user_template() {
+        let dir = std::env::temp_dir().join(format!("typer-ui-templates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let original = "---\ntitle: 月次\n---\n# 月次報告\n";
+        let mut app = test_app(original);
+        app.current_file = Some(PathBuf::from("C:/docs/月次.md"));
+        app.save_current_as_template(&dir, "月次報告", false)
+            .unwrap();
+        assert!(app.status_message.contains("月次報告"));
+        // 同じ名前は上書きの確認が要る
+        assert!(
+            app.save_current_as_template(&dir, "月次報告", false)
+                .is_err()
+        );
+
+        let template = list_user_templates(&dir).remove(0);
+        app.open_user_template(&template);
+        // 新しいタブに、ファイル名のない文書として開く（元の文書のタブは残る）
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.markdown_text, original);
+        assert_eq!(app.current_file, None);
+        assert_eq!(
+            app.tabs[0].as_ref().unwrap().current_file,
+            Some(PathBuf::from("C:/docs/月次.md"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_autosave_targets_cover_dirty_background_tabs() {
+        let snapshot = |file: Option<&str>, dirty: bool, text: &str| TabSnapshot {
+            markdown_text: text.to_string(),
+            current_file: file.map(PathBuf::from),
+            is_dirty: dirty,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            cursor_char_range: None,
+            last_export_path: None,
+        };
+        // 表示中のタブ（1番目）は未保存の新規文書で、変更あり
+        let mut app = test_app("表示中");
+        app.is_dirty = true;
+        app.tabs = vec![
+            None,
+            Some(snapshot(Some("C:/docs/report.md"), true, "裏のファイル")),
+            Some(snapshot(None, true, "裏の新規")),
+            Some(snapshot(Some("C:/docs/clean.md"), false, "変更なし")),
+        ];
+        app.active_tab = 0;
+        let targets = app.autosave_targets();
+        let names: Vec<String> = targets
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        // 新規文書は2つあるので別々の名前になり、変更のないタブは対象外
+        assert_eq!(
+            names,
+            vec![
+                "untitled_autosave.md",
+                "report.autosave.md",
+                "untitled_autosave_2.md"
+            ]
+        );
+        assert_eq!(targets[1].1, "裏のファイル");
+        assert_eq!(targets[2].1, "裏の新規");
+    }
+
+    #[test]
+    fn test_insert_table_from_tsv_at_cursor_and_undo() {
+        let mut app = test_app("前\n後\n");
+        app.cursor_char_range = Some((2, 2));
+        app.insert_table_from_tsv("a\tb\n1\t2\n");
+        assert_eq!(
+            app.markdown_text,
+            "前\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n後\n"
+        );
+        assert!(app.status_message.contains("1行"));
+        app.perform_undo();
+        assert_eq!(app.markdown_text, "前\n後\n");
+
+        // 表のデータでなければ原稿は変えない
+        app.insert_table_from_tsv("ただの文章");
+        assert_eq!(app.markdown_text, "前\n後\n");
+        assert!(app.status_message.contains("表のデータがありません"));
+    }
+
+    #[test]
+    fn test_preview_update_collects_syntax_warnings() {
+        let mut app = test_app("# 見出し\n\n{colr: red}\n本文\n");
+        app.trigger_preview_update();
+        assert_eq!(app.syntax_warnings.len(), 1);
+        assert_eq!(app.syntax_warnings[0].line, 3);
+
+        app.markdown_text = "# 見出し\n\n{color: red}\n本文\n".to_string();
+        app.trigger_preview_update();
+        assert!(app.syntax_warnings.is_empty());
+    }
+
     /// `TyperApp::new` はウィンドウ・GPUコンテキストを要するため、
     /// テキスト編集系ロジックのみを検証するための軽量インスタンスを直接構築する
     fn test_app(markdown: &str) -> TyperApp {
@@ -2540,6 +3131,8 @@ mod tests {
             page_textures: Vec::new(),
             last_compile_ms: 0.0,
             last_error: None,
+            last_line_map: SourceLineMap::default(),
+            syntax_warnings: Vec::new(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,
@@ -2551,6 +3144,8 @@ mod tests {
             startup_visibility_ensured: false,
             recent_files: Vec::new(),
             last_autosave_time: Instant::now(),
+            last_autosaved_revision: 0,
+            template_dialog: None,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
@@ -2855,25 +3450,39 @@ mod tests {
     }
 
     fn heading(text: &str, page: usize, y_pt: f32) -> HeadingPosition {
-        HeadingPosition { text: text.to_string(), page, y_pt }
+        HeadingPosition {
+            text: text.to_string(),
+            page,
+            y_pt,
+        }
     }
 
     #[test]
     fn test_find_preview_heading_matches_text_ignoring_markup() {
         let hs = vec![heading("概要", 0, 50.0), heading("太字の見出し", 1, 80.0)];
-        assert_eq!(find_preview_heading(&hs, 1, "**太字**の見出し", 0), Some((1, 80.0)));
+        assert_eq!(
+            find_preview_heading(&hs, 1, "**太字**の見出し", 0),
+            Some((1, 80.0))
+        );
     }
 
     #[test]
     fn test_find_preview_heading_picks_nth_duplicate() {
-        let hs = vec![heading("まとめ", 0, 10.0), heading("本文", 0, 40.0), heading("まとめ", 2, 30.0)];
+        let hs = vec![
+            heading("まとめ", 0, 10.0),
+            heading("本文", 0, 40.0),
+            heading("まとめ", 2, 30.0),
+        ];
         assert_eq!(find_preview_heading(&hs, 2, "まとめ", 1), Some((2, 30.0)));
     }
 
     #[test]
     fn test_find_preview_heading_falls_back_to_order() {
         let hs = vec![heading("A", 0, 10.0), heading("B", 1, 20.0)];
-        assert_eq!(find_preview_heading(&hs, 1, "一致しない", 0), Some((1, 20.0)));
+        assert_eq!(
+            find_preview_heading(&hs, 1, "一致しない", 0),
+            Some((1, 20.0))
+        );
         assert_eq!(find_preview_heading(&hs, 5, "一致しない", 0), None);
     }
 

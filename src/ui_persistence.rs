@@ -138,16 +138,32 @@ pub(crate) fn load_session() -> Option<(Vec<SessionTab>, usize)> {
         let tab = match (path, saved) {
             (Some(p), Some(text)) => {
                 if p.is_file() {
-                    SessionTab { current_file: Some(p), is_dirty, content: Some(text) }
+                    SessionTab {
+                        current_file: Some(p),
+                        is_dirty,
+                        content: Some(text),
+                    }
                 } else {
-                    SessionTab { current_file: None, is_dirty: true, content: Some(text) }
+                    SessionTab {
+                        current_file: None,
+                        is_dirty: true,
+                        content: Some(text),
+                    }
                 }
             }
             (Some(p), None) => match std::fs::read_to_string(&p) {
-                Ok(text) => SessionTab { current_file: Some(p), is_dirty: false, content: Some(text) },
+                Ok(text) => SessionTab {
+                    current_file: Some(p),
+                    is_dirty: false,
+                    content: Some(text),
+                },
                 Err(_) => continue,
             },
-            (None, Some(text)) => SessionTab { current_file: None, is_dirty, content: Some(text) },
+            (None, Some(text)) => SessionTab {
+                current_file: None,
+                is_dirty,
+                content: Some(text),
+            },
             (None, None) => continue,
         };
         if i == saved_active {
@@ -165,7 +181,13 @@ pub(crate) fn load_session() -> Option<(Vec<SessionTab>, usize)> {
 /// 現在編集中のファイルに対応する自動保存バックアップファイルのパスを決定する。
 /// 保存済みファイルの場合は同じフォルダに `.autosave.md` 拡張で置き、
 /// 未保存の新規文書の場合はアプリ設定フォルダ内の固定ファイルへ保存する。
-pub(crate) fn autosave_path_for(current_file: &Option<PathBuf>) -> Option<PathBuf> {
+///
+/// 未保存の新規文書が複数のタブにあるときは、`untitled_index`（0始まりの通し番号）で
+/// `untitled_autosave.md`・`untitled_autosave_2.md`… と書き分け、互いに上書きしないようにする
+pub(crate) fn autosave_path_for(
+    current_file: &Option<PathBuf>,
+    untitled_index: usize,
+) -> Option<PathBuf> {
     match current_file {
         Some(path) => {
             let stem = path.file_stem()?.to_string_lossy().to_string();
@@ -173,11 +195,12 @@ pub(crate) fn autosave_path_for(current_file: &Option<PathBuf>) -> Option<PathBu
         }
         None => {
             let appdata = std::env::var("APPDATA").ok()?;
-            Some(
-                PathBuf::from(appdata)
-                    .join("Typer")
-                    .join("untitled_autosave.md"),
-            )
+            let name = if untitled_index == 0 {
+                "untitled_autosave.md".to_string()
+            } else {
+                format!("untitled_autosave_{}.md", untitled_index + 1)
+            };
+            Some(PathBuf::from(appdata).join("Typer").join(name))
         }
     }
 }
