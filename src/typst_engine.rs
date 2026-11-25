@@ -618,7 +618,16 @@ mod tests {
             .expect("compile with covers: latin-in-cjk should succeed");
         let haystack = String::from_utf8_lossy(&pdf);
         assert!(haystack.contains("TimesNewRoman"));
-        assert!(haystack.contains("YuMincho"));
+        // 游明朝はWindowsの日本語環境には入っているが、CIのWindows Serverには入っていない。
+        // 入っていない環境では和文側の確認だけを飛ばす（欧文側の確認は上で済んでいる）
+        let has_yu_mincho = available_font_families()
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("Yu Mincho"));
+        if has_yu_mincho {
+            assert!(haystack.contains("YuMincho"));
+        } else {
+            eprintln!("Yu Mincho is not installed; skipping the Japanese font check");
+        }
     }
 
     #[test]
