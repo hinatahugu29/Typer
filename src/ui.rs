@@ -39,7 +39,7 @@ use crate::ui_persistence::{
 };
 use crate::ui_text::{
     byte_to_char_idx, char_idx_to_line_col, char_to_byte_idx, highlight_custom_markdown,
-    is_valid_hex_color, line_char_range,
+    is_valid_hex_color, line_char_range, tsv_to_markdown_table,
 };
 
 /// フォント名の入力欄と、入力中の文字で絞り込んだ候補ポップアップを描画する。値が変わったら `true`。
@@ -990,6 +990,33 @@ impl TyperApp {
         self.last_edit_time = Instant::now();
     }
 
+    /// クリップボードの表データ（Excelなどでコピーしたセル）をMarkdownの表にして、カーソル位置に貼り付ける
+    fn paste_table_from_clipboard(&mut self) {
+        let text = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+        match text {
+            Ok(text) => self.insert_table_from_tsv(&text),
+            Err(_) => {
+                self.status_message = "クリップボードの文字を読み取れませんでした".to_string();
+            }
+        }
+    }
+
+    /// タブ区切りのテキストを表に変換して挿入する（変換できなければ何もせず知らせる）
+    fn insert_table_from_tsv(&mut self, text: &str) {
+        match tsv_to_markdown_table(text) {
+            Some(table) => {
+                let rows = table.lines().count().saturating_sub(2);
+                self.insert_at_cursor(&format!("\n{table}\n"));
+                self.status_message = format!("表を貼り付けました（見出し行＋{rows}行）");
+            }
+            None => {
+                self.status_message =
+                    "クリップボードに表のデータがありません（Excelなどでセルを範囲選択してコピーしてください）"
+                        .to_string();
+            }
+        }
+    }
+
     /// 選択中のテキストがあれば `prefix` と `suffix` で囲み、なければ `prefix + default_inner + suffix` を挿入する
     fn wrap_selection_or_insert(&mut self, prefix: &str, default_inner: &str, suffix: &str) {
         self.push_undo_snapshot();
@@ -1782,6 +1809,10 @@ impl eframe::App for TyperApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
             self.insert_at_cursor("\n:::space 1em\n");
         }
+        // Excelなどからコピーしたセルを表として貼り付ける（通常の Ctrl+V はそのまま）
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V)) {
+            self.paste_table_from_clipboard();
+        }
 
         // 文字色（Ctrl+Alt+数字）
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Num1)) {
@@ -2399,6 +2430,15 @@ impl eframe::App for TyperApp {
                     );
                 }
                 if ui
+                    .small_button("📥 Excelから表")
+                    .on_hover_text(
+                        "Excelなどでコピーしたセルを、Markdownの表にしてカーソル位置に貼り付けます (Ctrl+Shift+V)",
+                    )
+                    .clicked()
+                {
+                    self.paste_table_from_clipboard();
+                }
+                if ui
                     .small_button("📏 行高さ指定")
                     .on_hover_text("直前の表に行の上下パディング（セル内余白）指定を挿入します")
                     .clicked()
@@ -2642,6 +2682,40 @@ mod tests {
         app.pending_cursor_selection = None;
         app.jump_to_source_line(99);
         assert_eq!(app.pending_cursor_selection, None);
+    }
+
+    /// 実際のクリップボードから読んで変換できることの確認（クリップボードを使うため普段は動かさない）。
+    /// 事前に Excel でセルをコピーするか、`Set-Clipboard "a`tb"` してから
+    /// `cargo test clipboard_table -- --ignored` で実行する
+    #[test]
+    #[ignore]
+    fn clipboard_table_paste_reads_the_system_clipboard() {
+        let mut app = test_app("");
+        app.paste_table_from_clipboard();
+        assert!(
+            app.markdown_text.contains("| --- |"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn test_insert_table_from_tsv_at_cursor_and_undo() {
+        let mut app = test_app("前\n後\n");
+        app.cursor_char_range = Some((2, 2));
+        app.insert_table_from_tsv("a\tb\n1\t2\n");
+        assert_eq!(
+            app.markdown_text,
+            "前\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n後\n"
+        );
+        assert!(app.status_message.contains("1行"));
+        app.perform_undo();
+        assert_eq!(app.markdown_text, "前\n後\n");
+
+        // 表のデータでなければ原稿は変えない
+        app.insert_table_from_tsv("ただの文章");
+        assert_eq!(app.markdown_text, "前\n後\n");
+        assert!(app.status_message.contains("表のデータがありません"));
     }
 
     #[test]

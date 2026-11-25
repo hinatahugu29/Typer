@@ -241,3 +241,149 @@ fn append_line_with_inline_highlights(
         rest = &rest[next_pos..];
     }
 }
+
+/// Excelなどの表計算ソフトからコピーしたセル（タブ区切りのテキスト）を、Markdownの表に変換する。
+///
+/// - 1行目を見出し行にする（列数は最も多い行に合わせ、足りないセルは空にする）
+/// - セル内の改行（Excelは `"..."` で囲んで書き出す）は `<br>` に、`|` は `\|` にする
+/// - `<` `^` だけのセルは結合の指定と区別するため `\<` `\^` にする
+///
+/// タブを1つも含まない（表のデータではない）ときは `None`
+pub(crate) fn tsv_to_markdown_table(text: &str) -> Option<String> {
+    let rows = parse_tsv(text);
+    if !rows.iter().any(|r| r.len() > 1) {
+        return None;
+    }
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(1);
+    let format_row = |row: &[String]| {
+        let mut line = String::from("|");
+        for i in 0..cols {
+            let cell = row.get(i).map(String::as_str).unwrap_or("");
+            line.push(' ');
+            line.push_str(&escape_table_cell(cell));
+            line.push_str(" |");
+        }
+        line
+    };
+    let mut out = String::new();
+    out.push_str(&format_row(&rows[0]));
+    out.push('\n');
+    out.push('|');
+    for _ in 0..cols {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    for row in &rows[1..] {
+        out.push_str(&format_row(row));
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn escape_table_cell(cell: &str) -> String {
+    let trimmed = cell.trim();
+    if trimmed == "<" || trimmed == "^" {
+        return format!("\\{trimmed}");
+    }
+    trimmed
+        .replace('|', "\\|")
+        .replace("\r\n", "\n")
+        .replace('\n', "<br>")
+}
+
+/// タブ区切りのテキストを行・セルに分ける。`"` で始まるセルは、次の `"` までを
+/// （タブ・改行・`""` で表した `"` を含めて）1つのセルとして読む
+fn parse_tsv(text: &str) -> Vec<Vec<String>> {
+    let text = text.replace("\r\n", "\n");
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut cell = String::new();
+    let mut chars = text.chars().peekable();
+    let mut at_cell_start = true;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if at_cell_start => {
+                at_cell_start = false;
+                while let Some(c) = chars.next() {
+                    if c == '"' {
+                        if chars.peek() == Some(&'"') {
+                            chars.next();
+                            cell.push('"');
+                        } else {
+                            break;
+                        }
+                    } else {
+                        cell.push(c);
+                    }
+                }
+            }
+            '\t' => {
+                row.push(std::mem::take(&mut cell));
+                at_cell_start = true;
+            }
+            '\n' => {
+                row.push(std::mem::take(&mut cell));
+                rows.push(std::mem::take(&mut row));
+                at_cell_start = true;
+            }
+            c => {
+                at_cell_start = false;
+                cell.push(c);
+            }
+        }
+    }
+    if !cell.is_empty() || !row.is_empty() {
+        row.push(cell);
+        rows.push(row);
+    }
+    // 末尾の空行（Excelはコピーの最後に改行を付ける）は捨てる
+    while rows.last().is_some_and(|r| r.iter().all(|c| c.is_empty())) {
+        rows.pop();
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tsv_tests {
+    use super::tsv_to_markdown_table;
+
+    #[test]
+    fn excel_cells_become_a_markdown_table() {
+        let tsv = "項目\t担当\t期限\r\n資料作成\t山田\t11/30\r\n確認\t佐藤\t12/5\r\n";
+        assert_eq!(
+            tsv_to_markdown_table(tsv).unwrap(),
+            "| 項目 | 担当 | 期限 |\n| --- | --- | --- |\n| 資料作成 | 山田 | 11/30 |\n| 確認 | 佐藤 | 12/5 |\n"
+        );
+    }
+
+    #[test]
+    fn quoted_cells_with_newlines_quotes_and_pipes() {
+        let tsv = "a\tb\n\"1行目\n2行目\"\t\"言った\"\"はい\"\"\"\nx|y\t<\n";
+        assert_eq!(
+            tsv_to_markdown_table(tsv).unwrap(),
+            "| a | b |\n| --- | --- |\n| 1行目<br>2行目 | 言った\"はい\" |\n| x\\|y | \\< |\n"
+        );
+    }
+
+    #[test]
+    fn ragged_rows_are_padded_and_empty_cells_kept() {
+        let tsv = "a\tb\tc\n1\n\t\t3\n";
+        assert_eq!(
+            tsv_to_markdown_table(tsv).unwrap(),
+            "| a | b | c |\n| --- | --- | --- |\n| 1 |  |  |\n|  |  | 3 |\n"
+        );
+    }
+
+    #[test]
+    fn text_without_tabs_is_not_a_table() {
+        assert_eq!(tsv_to_markdown_table("ただの文章\n2行目\n"), None);
+        assert_eq!(tsv_to_markdown_table(""), None);
+    }
+
+    #[test]
+    fn converted_table_parses_as_a_table() {
+        let md = tsv_to_markdown_table("a\tb\n1\t2\n").unwrap();
+        let doc = crate::parser::parse_document(&md);
+        assert!(matches!(doc.blocks[0], crate::model::Block::Table { .. }));
+    }
+}

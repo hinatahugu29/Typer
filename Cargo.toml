@@ -17,6 +17,8 @@ typst-svg = "0.15.1"
 typst-syntax = "0.15.1"
 typst-assets = { version = "0.15.1", features = ["fonts"] }
 rfd = "0.17.2"
+# Excelからコピーした表の読み取りに使う（egui-winit と同じ版を使い回す）
+arboard = { version = "3.7", default-features = false }
 zip = { version = "9.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
