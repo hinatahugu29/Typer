@@ -252,6 +252,8 @@ pub struct TyperApp {
     recent_files: Vec<PathBuf>,
     /// 自動保存の最終実行時刻
     last_autosave_time: Instant,
+    /// 直近に自動保存したときの `revision`（変更がなければ自動保存を繰り返さない）
+    last_autosaved_revision: u64,
     /// 見出しアウトラインパネルの表示フラグ
     show_outline_panel: bool,
     /// カスタム文字色入力欄（HEXコード）
@@ -373,6 +375,7 @@ impl TyperApp {
             startup_visibility_ensured: false,
             recent_files,
             last_autosave_time: Instant::now(),
+            last_autosaved_revision: 0,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
@@ -718,21 +721,52 @@ impl TyperApp {
     /// 編集停止から一定時間が経過していれば自動保存バックアップを書き出す（失敗は無視）
     fn maybe_autosave(&mut self) {
         const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
-        if !self.is_dirty {
+        // 表示中のタブだけでなく、裏のタブの未保存の変更も対象にする。
+        // 前回の自動保存から何も変わっていなければ書き直さない
+        if !self.any_unsaved_changes() || self.revision == self.last_autosaved_revision {
             return;
         }
         if self.last_autosave_time.elapsed() < AUTOSAVE_INTERVAL {
             return;
         }
         self.last_autosave_time = Instant::now();
-        if let Some(path) = autosave_path_for(&self.current_file) {
+        self.last_autosaved_revision = self.revision;
+        for (path, text) in self.autosave_targets() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&path, &self.markdown_text);
+            let _ = std::fs::write(&path, text);
         }
         // 異常終了時にも直近のタブ構成が残るよう、自動保存のタイミングでセッションも書き出す
         self.save_session_now();
+    }
+
+    /// 自動保存で書き出す (保存先, 本文) の一覧。未保存の変更があるタブすべてが対象
+    fn autosave_targets(&self) -> Vec<(PathBuf, String)> {
+        let mut untitled = 0usize;
+        let mut targets = Vec::new();
+        for (i, slot) in self.tabs.iter().enumerate() {
+            let (file, dirty, text) = match slot {
+                Some(s) => (&s.current_file, s.is_dirty, &s.markdown_text),
+                None if i == self.active_tab => {
+                    (&self.current_file, self.is_dirty, &self.markdown_text)
+                }
+                None => continue,
+            };
+            let index = if file.is_none() {
+                untitled += 1;
+                untitled - 1
+            } else {
+                0
+            };
+            if !dirty {
+                continue;
+            }
+            if let Some(path) = autosave_path_for(file, index) {
+                targets.push((path, text.clone()));
+            }
+        }
+        targets
     }
 
     /// 未保存の新規文書のファイル名候補を推測する（優先順位: フロントマターの `title:` → 最初のH1見出し → 既定値）
@@ -2719,6 +2753,45 @@ mod tests {
     }
 
     #[test]
+    fn test_autosave_targets_cover_dirty_background_tabs() {
+        let snapshot = |file: Option<&str>, dirty: bool, text: &str| TabSnapshot {
+            markdown_text: text.to_string(),
+            current_file: file.map(PathBuf::from),
+            is_dirty: dirty,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            cursor_char_range: None,
+            last_export_path: None,
+        };
+        // 表示中のタブ（1番目）は未保存の新規文書で、変更あり
+        let mut app = test_app("表示中");
+        app.is_dirty = true;
+        app.tabs = vec![
+            None,
+            Some(snapshot(Some("C:/docs/report.md"), true, "裏のファイル")),
+            Some(snapshot(None, true, "裏の新規")),
+            Some(snapshot(Some("C:/docs/clean.md"), false, "変更なし")),
+        ];
+        app.active_tab = 0;
+        let targets = app.autosave_targets();
+        let names: Vec<String> = targets
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        // 新規文書は2つあるので別々の名前になり、変更のないタブは対象外
+        assert_eq!(
+            names,
+            vec![
+                "untitled_autosave.md",
+                "report.autosave.md",
+                "untitled_autosave_2.md"
+            ]
+        );
+        assert_eq!(targets[1].1, "裏のファイル");
+        assert_eq!(targets[2].1, "裏の新規");
+    }
+
+    #[test]
     fn test_insert_table_from_tsv_at_cursor_and_undo() {
         let mut app = test_app("前\n後\n");
         app.cursor_char_range = Some((2, 2));
@@ -2794,6 +2867,7 @@ mod tests {
             startup_visibility_ensured: false,
             recent_files: Vec::new(),
             last_autosave_time: Instant::now(),
+            last_autosaved_revision: 0,
             show_outline_panel: false,
             custom_color_hex: String::new(),
             show_font_suggestions: false,
