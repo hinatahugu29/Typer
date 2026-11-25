@@ -2,6 +2,7 @@
 
 mod docx_export;
 mod html_export;
+mod lint;
 mod math;
 mod model;
 mod parser;

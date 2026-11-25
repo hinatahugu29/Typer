@@ -17,6 +17,7 @@ use eframe::egui::{
 
 use crate::docx_export::generate_docx_bytes_with_base;
 use crate::html_export::generate_html_with_base;
+use crate::lint::{SyntaxWarning, lint_markdown};
 use crate::model::{FontChoice, Orientation};
 use crate::parser::{
     extract_headings_outline, parse_document, parse_settings, update_document_settings_in_markdown,
@@ -224,6 +225,8 @@ pub struct TyperApp {
     last_error: Option<Vec<DescribedError>>,
     /// 直近に生成したTypstコードの各行が原稿の何行目に由来するか（エラー位置の表示用）
     last_line_map: SourceLineMap,
+    /// 原稿の書き間違い（効いていない属性指定など）の警告。プレビュー更新のたびに調べ直す
+    syntax_warnings: Vec<SyntaxWarning>,
 
     /// プレビュー表示倍率（1.0 = 100%）
     zoom: f32,
@@ -358,6 +361,7 @@ impl TyperApp {
             last_compile_ms: 0.0,
             last_error: None,
             last_line_map: SourceLineMap::default(),
+            syntax_warnings: Vec::new(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,
@@ -488,6 +492,7 @@ impl TyperApp {
         let (typst_code, line_map) = generate_typst_source_with_map(&doc, base.as_deref());
         self.last_typst_code = typst_code;
         self.last_line_map = line_map;
+        self.syntax_warnings = lint_markdown(&self.markdown_text);
         self.is_compiling = true;
         self.pending_render = false;
 
@@ -1167,13 +1172,70 @@ impl TyperApp {
         self.status_message = format!("原稿の{line}行目へ移動しました");
     }
 
-    /// プレビュー上部の組版エラー欄を描画する。原稿の行が分かるものはクリックでその行へ移動できる
+    /// プレビュー上部の組版エラー欄と書き間違いの警告欄を描画する。
+    /// 原稿の行が分かるものはクリックでその行へ移動できる
     fn draw_message_panel(&mut self, ui: &mut egui::Ui) {
+        let mut jump_to: Option<usize> = None;
+        self.draw_compile_errors(ui, &mut jump_to);
+        self.draw_syntax_warnings(ui, &mut jump_to);
+        if let Some(line) = jump_to {
+            self.jump_to_source_line(line);
+        }
+    }
+
+    /// 書き間違いの警告欄（組版は止まらないが、指定が効いていない箇所）
+    fn draw_syntax_warnings(&self, ui: &mut egui::Ui, jump_to: &mut Option<usize>) {
+        const MAX_SHOWN: usize = 5;
+        if self.syntax_warnings.is_empty() {
+            return;
+        }
+        let warn_color = Color32::from_rgb(150, 85, 0);
+        egui::Frame::NONE
+            .fill(Color32::from_rgb(254, 247, 224))
+            .inner_margin(8.0)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "✎ 書き方の確認（{}件）：次の指定は効いていません",
+                        self.syntax_warnings.len()
+                    ))
+                    .small()
+                    .strong()
+                    .color(warn_color),
+                );
+                for w in self.syntax_warnings.iter().take(MAX_SHOWN) {
+                    let text = RichText::new(format!("[原稿 {}行目] {}", w.line, w.message))
+                        .small()
+                        .color(warn_color)
+                        .underline();
+                    if ui
+                        .add(egui::Label::new(text).sense(Sense::click()))
+                        .on_hover_text("クリックで原稿のこの行へ移動します")
+                        .clicked()
+                    {
+                        *jump_to = Some(w.line);
+                    }
+                }
+                if self.syntax_warnings.len() > MAX_SHOWN {
+                    ui.label(
+                        RichText::new(format!(
+                            "…ほか {}件（上から順に直すと続きが表示されます）",
+                            self.syntax_warnings.len() - MAX_SHOWN
+                        ))
+                        .small()
+                        .color(warn_color),
+                    );
+                }
+            });
+    }
+
+    /// 組版エラー欄（組版できず、直前のプレビューのまま）
+    fn draw_compile_errors(&self, ui: &mut egui::Ui, jump_to: &mut Option<usize>) {
         let Some(errors) = &self.last_error else {
             return;
         };
         let error_color = Color32::from_rgb(197, 34, 31);
-        let mut jump_to: Option<usize> = None;
         egui::Frame::NONE
             .fill(Color32::from_rgb(253, 232, 230))
             .inner_margin(8.0)
@@ -1194,7 +1256,7 @@ impl TyperApp {
                                 .on_hover_text("クリックで原稿のこの行へ移動します")
                                 .clicked()
                             {
-                                jump_to = Some(line);
+                                *jump_to = Some(line);
                             }
                         }
                         None => {
@@ -1203,9 +1265,6 @@ impl TyperApp {
                     }
                 }
             });
-        if let Some(line) = jump_to {
-            self.jump_to_source_line(line);
-        }
     }
 
     /// 見出しアウトラインパネルを描画する（クリックで該当見出しへジャンプ）
@@ -2585,6 +2644,18 @@ mod tests {
         assert_eq!(app.pending_cursor_selection, None);
     }
 
+    #[test]
+    fn test_preview_update_collects_syntax_warnings() {
+        let mut app = test_app("# 見出し\n\n{colr: red}\n本文\n");
+        app.trigger_preview_update();
+        assert_eq!(app.syntax_warnings.len(), 1);
+        assert_eq!(app.syntax_warnings[0].line, 3);
+
+        app.markdown_text = "# 見出し\n\n{color: red}\n本文\n".to_string();
+        app.trigger_preview_update();
+        assert!(app.syntax_warnings.is_empty());
+    }
+
     /// `TyperApp::new` はウィンドウ・GPUコンテキストを要するため、
     /// テキスト編集系ロジックのみを検証するための軽量インスタンスを直接構築する
     fn test_app(markdown: &str) -> TyperApp {
@@ -2618,6 +2689,7 @@ mod tests {
             last_compile_ms: 0.0,
             last_error: None,
             last_line_map: SourceLineMap::default(),
+            syntax_warnings: Vec::new(),
             zoom: 1.0,
             preview_maximized: false,
             outline_width: 220.0,
